@@ -138,24 +138,6 @@ mod tests_proof {
     use proptest::{prelude::*, test_runner::Config};
     use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
-    use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan, fmt::time::UtcTime};
-
-    #[ctor::ctor]
-    fn init_console_subscriber() {
-        let timer = UtcTime::rfc_3339();
-        tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_span_events(FmtSpan::CLOSE)
-            .with_timer(timer)
-            .with_target(true)
-            .with_thread_ids(false)
-            .with_line_number(false)
-            .with_file(false)
-            .with_level(true)
-            .with_ansi(true)
-            .with_writer(std::io::stdout)
-            .init();
-    }
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]
