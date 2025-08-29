@@ -7,8 +7,14 @@ edition = "2024"
 ark-ec = {version = "0.5.0", features = ["parallel"]}
 ark-ff = {version = "0.5.0", features = ["parallel"]}
 ark-secp256k1 = "0.5.0"
+ark-std = {version = "0.5.0", features = ["parallel"]}
 proptest = "1.7.0"
+spongefish = {git = "https://github.com/arkworks-rs/spongefish" , ref = "3ded547", features = ["arkworks-algebra"]}
 rand = "0.8"
+rayon = "1.11"
+tracing = "0.1"
 
 [dev-dependencies]
-ark-std = "0.5.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+time = { version = "0.3", features = ["formatting"] }
+ctor = "0.2"
