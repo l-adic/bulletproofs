@@ -45,7 +45,7 @@ pub struct CRS<G: CurveGroup> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct CrsSize {
-    log2_size: u64,
+    pub log2_size: u64,
 }
 
 impl Arbitrary for CrsSize {
@@ -53,7 +53,7 @@ impl Arbitrary for CrsSize {
     type Strategy = proptest::strategy::BoxedStrategy<Self>;
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-        (15..=16u8)
+        (2..=16u8)
             .prop_map(|log2_size| CrsSize {
                 log2_size: log2_size as u64,
             })
