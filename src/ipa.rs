@@ -1,5 +1,5 @@
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One};
+use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
 use spongefish::{
     DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
@@ -144,8 +144,8 @@ where
     let transcript: Vec<((G, G), G::ScalarField)> = (0..log2_n)
         .map(|_| {
             let [left, right]: [G; 2] = verifier_state.next_points()?;
-            let [alpha]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
-            Ok(((left, right), alpha))
+            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+            Ok(((left, right), x))
         })
         .collect::<ProofResult<Vec<_>>>()?;
 
@@ -159,19 +159,21 @@ where
                         if (i >> j) & 1 == 1 {
                             transcript[log2_n - j - 1].1
                         } else {
-                            (transcript[log2_n - j - 1].1)
+                            transcript[log2_n - j - 1]
+                                .1
                                 .inverse()
-                                .expect("non-zero x")
+                                .expect("non-zero inverse")
                         }
                     })
                     .fold(G::ScalarField::one(), |acc, x| acc * x)
             })
             .collect::<Vec<_>>();
 
-        let ss_inverse = ss
-            .iter()
-            .map(|x| x.inverse().expect("non-zero x"))
-            .collect::<Vec<_>>();
+        let ss_inverse = {
+            let mut ss_inverse = ss.clone();
+            batch_inversion(&mut ss_inverse);
+            ss_inverse
+        };
 
         G::msm_unchecked(&crs.g, &ss).mul(a)
             + G::msm_unchecked(&crs.h, &ss_inverse).mul(b)
@@ -182,7 +184,7 @@ where
         transcript
             .into_iter()
             .fold(statement.p, |acc, ((left, right), x)| {
-                acc + left * x.square() + right * x.inverse().expect("non-zero x").square()
+                acc + left * x.square() + right * x.inverse().expect("non-zero inverse").square()
             })
     };
 
