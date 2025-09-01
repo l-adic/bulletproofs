@@ -9,7 +9,7 @@ use spongefish::{
     },
 };
 use std::ops::Mul;
-use tracing::{debug, instrument};
+use tracing::instrument;
 
 use crate::{
     types::{CRS, Statement, Vector, Witness},
@@ -44,85 +44,85 @@ where
 
 #[instrument(skip_all, fields(witness_size = witness.a.0.len()))]
 pub fn prove<G: CurveGroup>(
-    prover_state: &mut ProverState,
+    mut prover_state: ProverState,
     crs: &CRS<G>,
-    statement: Statement<G>,
-    witness: Witness<G::ScalarField>,
+    statement: &Statement<G>,
+    witness: &Witness<G::ScalarField>,
 ) -> ProofResult<Vec<u8>> {
-    if witness.a.0.len() == 1 {
-        debug!("Base case reached, adding final scalars");
-        prover_state.add_scalars(&[witness.a.0[0], witness.b.0[0]])?;
-        return Ok(prover_state.narg_string().to_vec());
+    let mut n = crs.size();
+    let mut g = crs.g.clone();
+    let mut h = crs.h.clone();
+    let mut statement = statement.clone();
+    let mut witness = witness.clone();
+
+    while n != 1 {
+        n /= 2;
+        let (g_left, g_right) = g.split_at(n);
+        let (h_left, h_right) = h.split_at(n);
+        let (a_left, a_right) = witness.a.0.split_at(n);
+        let (b_left, b_right) = witness.b.0.split_at(n);
+
+        let left = {
+            let c_left = dot(a_left, b_right);
+            crs.u.mul(c_left)
+                + G::msm_unchecked(g_right, a_left)
+                + G::msm_unchecked(h_left, b_right)
+        };
+
+        let right = {
+            let c_right = dot(a_right, b_left);
+            crs.u.mul(c_right)
+                + G::msm_unchecked(g_left, a_right)
+                + G::msm_unchecked(h_right, b_left)
+        };
+
+        prover_state.add_points(&[left, right])?;
+
+        let [alpha]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let alpha_inv = alpha.inverse().expect("non-zero alpha");
+
+        g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
+        h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
+
+        witness.a = Vector(fold_scalars(a_left, a_right, alpha, alpha_inv));
+        witness.b = Vector(fold_scalars(b_left, b_right, alpha_inv, alpha));
+
+        statement.p += left * alpha.square() + right * alpha_inv.square();
     }
 
-    let n = crs.size() / 2;
-    debug!("Folding round with size {}", n * 2);
-    let (g_left, g_right) = crs.g.split_at(n);
-    let (h_left, h_right) = crs.h.split_at(n);
-    let (a_left, a_right) = witness.a.0.split_at(n);
-    let (b_left, b_right) = witness.b.0.split_at(n);
-
-    let left = tracing::debug_span!("compute_left_commitment").in_scope(|| {
-        let c_left = dot(a_left, b_right);
-        crs.u.mul(c_left) + G::msm_unchecked(g_right, a_left) + G::msm_unchecked(h_left, b_right)
-    });
-
-    let right = tracing::debug_span!("compute_right_commitment").in_scope(|| {
-        let c_right = dot(a_right, b_left);
-        crs.u.mul(c_right) + G::msm_unchecked(g_left, a_right) + G::msm_unchecked(h_right, b_left)
-    });
-
-    prover_state.add_points(&[left, right])?;
-
-    let [alpha]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
-    let alpha_inv = alpha.inverse().expect("non-zero alpha");
-
-    let crs = tracing::debug_span!("fold_crs").in_scope(|| {
-        let g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
-        let h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
-        let u = crs.u;
-        CRS { g, h, u }
-    });
-
-    let witness = tracing::debug_span!("fold_witness_vectors").in_scope(|| {
-        let a = fold_scalars(a_left, a_right, alpha, alpha_inv);
-        let b = fold_scalars(b_left, b_right, alpha_inv, alpha);
-        Witness::new(Vector(a), Vector(b))
-    });
-    let statement = Statement {
-        p: statement.p + left * alpha.square() + right * alpha_inv.square(),
-    };
-    prove(prover_state, &crs, statement, witness)
+    prover_state.add_scalars(&[witness.a.0[0], witness.b.0[0]])?;
+    Ok(prover_state.narg_string().to_vec())
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()))]
 pub fn verify<G: CurveGroup>(
     mut verifier_state: VerifierState,
-    mut crs: CRS<G>,
-    mut statement: Statement<G>,
+    crs: &CRS<G>,
+    statement: &Statement<G>,
 ) -> ProofResult<()> {
     let mut n = crs.size();
+    let mut g = crs.g.clone();
+    let mut h = crs.h.clone();
+    let mut statement = statement.clone();
 
     while n != 1 {
         let [left, right]: [G; 2] = verifier_state.next_points()?;
         n /= 2;
-        debug!("Verification round with size {}", n);
         let [alpha]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
         let alpha_inv = alpha.inverse().expect("non-zero alpha");
-        tracing::debug_span!("fold_crs").in_scope(|| {
-            let (g_left, g_right) = crs.g.split_at(n);
-            let (h_left, h_right) = crs.h.split_at(n);
-            crs.g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
-            crs.h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
-        });
+        {
+            let (g_left, g_right) = g.split_at(n);
+            let (h_left, h_right) = h.split_at(n);
+            g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
+            h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
+        }
         statement.p += left * alpha.square() + right * alpha_inv.square();
     }
 
     let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
 
     let c = a * b;
-    debug!("Verification final scalars obtained");
-    if (crs.g[0] * a + crs.h[0] * b + crs.u * c - statement.p).is_zero() {
+    if (g[0] * a + h[0] * b + crs.u * c - statement.p).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -160,12 +160,12 @@ mod tests_proof {
           prover_state.public_points(&[statement.p]).unwrap();
           prover_state.ratchet().unwrap();
 
-          let proof = prove(&mut prover_state, &crs, statement.clone(), inputs).expect("proof should be generated");
+          let proof = prove(prover_state, &crs, &statement, &inputs).expect("proof should be generated");
 
           let mut verifier_state = domain_separator.to_verifier_state(&proof);
           verifier_state.public_points(&[statement.p]).expect("cannot add statment");
           verifier_state.ratchet().expect("failed to wratchet");
-          verify(verifier_state, crs, statement).expect("proof should verify")
+          verify(verifier_state, &crs, &statement).expect("proof should verify")
 
       }
     }

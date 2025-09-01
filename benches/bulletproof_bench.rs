@@ -41,7 +41,7 @@ fn bench_prove_verify_cycle(c: &mut Criterion) {
                 prover_state.public_points(&[stmt.p]).unwrap();
                 prover_state.ratchet().unwrap();
 
-                let proof = prove(&mut prover_state, &crs, stmt.clone(), witness.clone()).unwrap();
+                let proof = prove(prover_state, &crs, &stmt, &witness).unwrap();
                 proofs.insert(size, proof.clone());
                 black_box(proof)
             })
@@ -55,7 +55,7 @@ fn bench_prove_verify_cycle(c: &mut Criterion) {
                 verifier_state.public_points(&[stmt.p]).unwrap();
                 verifier_state.ratchet().unwrap();
 
-                verify(verifier_state, crs.clone(), stmt.clone()).unwrap();
+                verify(verifier_state, &crs, &stmt).unwrap();
                 black_box(())
             })
         });
