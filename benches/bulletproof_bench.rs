@@ -12,6 +12,7 @@ use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 fn bench_prove_verify_cycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulletproof");
     group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(80));
 
     // Test different CRS sizes (log values)
     let sizes = [2 as u64, 4, 8, 16];
