@@ -1,5 +1,5 @@
 use ark_ec::CurveGroup;
-use ark_ff::Field;
+use ark_ff::{Field, One};
 use ark_std::log2;
 use spongefish::{
     DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
@@ -95,7 +95,7 @@ pub fn prove<G: CurveGroup>(
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()))]
-pub fn verify<G: CurveGroup>(
+pub fn verify_naive<G: CurveGroup>(
     mut verifier_state: VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
@@ -120,9 +120,73 @@ pub fn verify<G: CurveGroup>(
     }
 
     let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
-
     let c = a * b;
+
     if (g[0] * a + h[0] * b + crs.u * c - statement.p).is_zero() {
+        Ok(())
+    } else {
+        Err(ProofError::InvalidProof)
+    }
+}
+
+#[instrument(skip_all, fields(crs_size = crs.size()))]
+pub fn verify<G: CurveGroup>(
+    mut verifier_state: VerifierState,
+    crs: &CRS<G>,
+    statement: &Statement<G>,
+) -> ProofResult<()>
+where
+    G::ScalarField: Field,
+{
+    let n = crs.size();
+    let log2_n = log2(n) as usize;
+
+    let transcript: Vec<((G, G), G::ScalarField)> = (0..log2_n)
+        .map(|_| {
+            let [left, right]: [G; 2] = verifier_state.next_points()?;
+            let [alpha]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+            Ok(((left, right), alpha))
+        })
+        .collect::<ProofResult<Vec<_>>>()?;
+
+    let lhs: G = {
+        let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+
+        let ss: Vec<G::ScalarField> = (0..n)
+            .map(|i| {
+                (0..log2_n)
+                    .map(|j| {
+                        if (i >> j) & 1 == 1 {
+                            transcript[log2_n - j - 1].1
+                        } else {
+                            (transcript[log2_n - j - 1].1)
+                                .inverse()
+                                .expect("non-zero x")
+                        }
+                    })
+                    .fold(G::ScalarField::one(), |acc, x| acc * x)
+            })
+            .collect::<Vec<_>>();
+
+        let ss_inverse = ss
+            .iter()
+            .map(|x| x.inverse().expect("non-zero x"))
+            .collect::<Vec<_>>();
+
+        G::msm_unchecked(&crs.g, &ss).mul(a)
+            + G::msm_unchecked(&crs.h, &ss_inverse).mul(b)
+            + crs.u.mul(a * b)
+    };
+
+    let rhs = {
+        transcript
+            .into_iter()
+            .fold(statement.p, |acc, ((left, right), x)| {
+                acc + left * x.square() + right * x.inverse().expect("non-zero x").square()
+            })
+    };
+
+    if (lhs - rhs).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -142,7 +206,7 @@ mod tests_proof {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn proof_works((crs, inputs) in any::<CrsSize>().prop_map(|crs_size| {
+      fn test_prove_verify_works((crs, inputs) in any::<CrsSize>().prop_map(|crs_size| {
           let crs: CRS<Projective> = CRS::rand(crs_size);
           let n = crs.size() as u64;
           let inputs = Witness::rand(n);
@@ -165,7 +229,12 @@ mod tests_proof {
           let mut verifier_state = domain_separator.to_verifier_state(&proof);
           verifier_state.public_points(&[statement.p]).expect("cannot add statment");
           verifier_state.ratchet().expect("failed to wratchet");
-          verify(verifier_state, &crs, &statement).expect("proof should verify")
+          verify_naive(verifier_state, &crs, &statement).expect("proof should verify");
+
+          let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
+          fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
+          fast_verifier_state.ratchet().expect("failed to wratchet");
+          verify(fast_verifier_state, &crs, &statement).expect("proof should verify")
 
       }
     }
