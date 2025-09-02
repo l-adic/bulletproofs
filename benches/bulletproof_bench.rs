@@ -16,7 +16,7 @@ fn bench_prove_verify_cycle(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(80));
 
     // Test different CRS sizes (log values)
-    let sizes = [2 as u64, 4, 8, 16];
+    let sizes = [2_u64, 4, 8, 16];
 
     let mut proofs: HashMap<u64, Vec<u8>> = HashMap::new();
 

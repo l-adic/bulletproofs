@@ -31,18 +31,15 @@ impl<Fr: PrimeField, const N: usize> Witness<N, Fr> {
     }
 }
 
+#[derive(Debug)]
 pub struct Statement<const N: usize, G> {
-    v: G,
+    pub v: G,
 }
 
 impl<G: CurveGroup, const N: usize> Statement<N, G> {
-    pub fn new<Rng: rand::Rng>(crs: &CRS<G>, witness: &Witness<N, G::ScalarField>) -> Self {
+    pub fn new(crs: &CRS<G>, witness: &Witness<N, G::ScalarField>) -> Self {
         Statement {
             v: crs.g.mul(witness.v) + crs.h.mul(witness.gamma),
         }
-    }
-
-    pub fn v(&self) -> G {
-        self.v
     }
 }

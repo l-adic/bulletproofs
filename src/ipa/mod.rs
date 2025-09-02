@@ -217,12 +217,14 @@ mod tests_proof {
           let inputs = Witness::rand(n);
           (crs, inputs)
       })) {
-          let domain_separator = DomainSeparator::new("example.com");
-          // add the IO of the bulletproof statement
-          let domain_separator =
-              BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
-          // add the IO of the bulletproof protocol (the transcript)
-          let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size());
+          let domain_separator = {
+            let domain_separator = DomainSeparator::new("test-ipa");
+            // add the IO of the bulletproof statement
+            let domain_separator =
+                BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
+            // add the IO of the bulletproof protocol (the transcript)
+            BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size())
+          };
           let mut prover_state = domain_separator.to_prover_state();
 
           let statement = statement(&crs, &inputs);

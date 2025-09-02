@@ -1,5 +1,6 @@
 use crate::ipa::utils::dot;
 use ark_ff::{BigInteger, Field, PrimeField};
+use tracing::instrument;
 
 // Decompose a field element into a vector of its bits (as field elements)
 // E.g. for a field element a, return [a_0, a_1, ..., a_{n-1}] where
@@ -18,8 +19,67 @@ pub fn bit_decomposition<Fr: PrimeField>(a: Fr) -> Vec<Fr> {
     bits
 }
 
+pub struct VectorPolynomial<const N: usize, Fr: Field> {
+    pub coeffs: Vec<[Fr; N]>,
+}
+
+impl<const N: usize, Fr: Field> VectorPolynomial<N, Fr> {
+    #[cfg(test)]
+    pub fn rand(degree: usize) -> Self
+    where
+        Fr: PrimeField,
+    {
+        let mut coeffs = Vec::with_capacity(degree + 1);
+        for _ in 0..=degree {
+            let mut coeff = [Fr::zero(); N];
+            for i in 0..N {
+                coeff[i] = Fr::rand(&mut ark_std::rand::thread_rng());
+            }
+            coeffs.push(coeff);
+        }
+        Self { coeffs }
+    }
+}
+
+// The inner product is defined for l, r \elem F^{n}[X] (of the same degreee d) as
+// <l,r> = \sum_{i=0}^{d} \sum_{j=0}^{i}} <l_i, r_j> X^{i+j}
+impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
+    #[instrument(skip(self, rhs))]
+    pub fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
+        assert!(
+            self.coeffs.len() == rhs.coeffs.len(),
+            "Vector polynomials must have the same degree"
+        );
+        let degree = self.coeffs.len() - 1;
+        println!("Degree: {}", degree);
+        let mut result_coeffs = vec![Fr::zero(); (2 * degree) + 1];
+        print!("result_coeffs len: {}\n", result_coeffs.len());
+
+        for i in 0..=degree {
+            for j in 0..=i {
+                let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
+                println!("i: {}, j: {}, dot_product: {:?}", i, j, dot_product);
+                result_coeffs[i + j] += dot_product;
+            }
+        }
+        result_coeffs
+    }
+
+    pub fn evaluate(&self, x: Fr) -> [Fr; N] {
+        let mut result = [Fr::zero(); N];
+        let mut power_of_x = Fr::one();
+        for coeff in &self.coeffs {
+            for i in 0..N {
+                result[i] += coeff[i] * power_of_x;
+            }
+            power_of_x *= x;
+        }
+        result
+    }
+}
+
 #[cfg(test)]
-mod tests_range {
+mod tests {
     use super::*;
     use ark_ec::AdditiveGroup;
     use ark_secp256k1::Fr;
@@ -40,41 +100,23 @@ mod tests_range {
             prop_assert_eq!(x, reconstructed);
       }
     }
-}
 
-pub struct VectorPolynomial<const N: usize, Fr: Field> {
-    pub coeffs: Vec<[Fr; N]>,
-}
-
-// The inner product is defined for l, r \elem F^{n}[X] (of the same degreee d) as
-// <l,r> = \sum_{i=0}^{d} \sum_{j=0}^{i}} <l_i, r_j> X^{i+j}
-impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
-    pub fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
-        assert!(
-            self.coeffs.len() == rhs.coeffs.len(),
-            "Vector polynomials must have the same degree"
-        );
-        let d = self.coeffs.len() - 1;
-        let mut result_coeffs = vec![Fr::zero(); 2 * d];
-
-        for i in 0..=d {
-            for j in 0..=i {
-                let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
-                result_coeffs[i + j] += dot_product;
-            }
-        }
-        result_coeffs
-    }
-
-    pub fn evaluate(&self, x: Fr) -> [Fr; N] {
-        let mut result = [Fr::zero(); N];
-        let mut power_of_x = Fr::one();
-        for coeff in &self.coeffs {
-            for i in 0..N {
-                result[i] += coeff[i] * power_of_x;
-            }
-            power_of_x *= x;
-        }
-        result
+    // proptest that evaluating an inner product of two VectorPolynomials is the inner product of the evaluations
+    proptest! {
+      #[test]
+      fn test_inner_product_eval(
+        degree in 1usize..5,
+        x in prop::strategy::Just(Fr::rand(&mut ark_std::rand::thread_rng()))
+      ) {
+            let poly1 = VectorPolynomial::<4, Fr>::rand(degree);
+            let poly2 = VectorPolynomial::<4, Fr>::rand(degree);
+            let t = poly1.inner_product(&poly2);
+            let eval1 = poly1.evaluate(x);
+            let eval2 = poly2.evaluate(x);
+            let inner_prod_eval = dot(&eval1, &eval2);
+            let powers_of_x = (0..=degree*2).map(|i| x.pow([i as u64])).collect::<Vec<_>>();
+            let eval_t_at_x = t.iter().zip(powers_of_x.iter()).fold(Fr::zero(), |acc, (coeff, power)| acc + (*coeff * *power));
+            prop_assert_eq!(inner_prod_eval, eval_t_at_x);
+      }
     }
 }
