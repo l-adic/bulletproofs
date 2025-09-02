@@ -137,6 +137,20 @@ pub fn statement<G: CurveGroup>(crs: &CRS<G>, inputs: &Witness<G::ScalarField>) 
     Statement { p }
 }
 
+pub struct AugmentedStatement<G: CurveGroup> {
+    pub p: G,
+    pub c: G::ScalarField,
+}
+
+pub fn augmented_statement<G: CurveGroup>(gs: &[G::Affine], hs: &[G::Affine], inputs: &Witness<G::ScalarField>) -> AugmentedStatement<G> {
+    let g = G::msm_unchecked(gs, &inputs.a.0);
+    let h = G::msm_unchecked(hs, &inputs.b.0);
+    let p = g.add(&h);
+    AugmentedStatement {
+        p,
+        c: inputs.c }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
