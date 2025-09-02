@@ -1,3 +1,6 @@
+pub mod types;
+pub(crate) mod utils;
+
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
@@ -11,7 +14,7 @@ use spongefish::{
 use std::ops::Mul;
 use tracing::instrument;
 
-use crate::{
+use crate::ipa::{
     types::{CRS, Statement, Vector, Witness},
     utils::{dot, fold_generators, fold_scalars},
 };
@@ -50,15 +53,15 @@ pub fn prove<G: CurveGroup>(
     witness: &Witness<G::ScalarField>,
 ) -> ProofResult<Vec<u8>> {
     let mut n = crs.size();
-    let mut g = crs.g.clone();
-    let mut h = crs.h.clone();
+    let mut gs = crs.gs.clone();
+    let mut hs = crs.hs.clone();
     let mut statement = statement.clone();
     let mut witness = witness.clone();
 
     while n != 1 {
         n /= 2;
-        let (g_left, g_right) = g.split_at(n);
-        let (h_left, h_right) = h.split_at(n);
+        let (g_left, g_right) = gs.split_at(n);
+        let (h_left, h_right) = hs.split_at(n);
         let (a_left, a_right) = witness.a.0.split_at(n);
         let (b_left, b_right) = witness.b.0.split_at(n);
 
@@ -81,8 +84,8 @@ pub fn prove<G: CurveGroup>(
         let [alpha]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
         let alpha_inv = alpha.inverse().expect("non-zero alpha");
 
-        g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
-        h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
+        gs = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
+        hs = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
 
         witness.a = Vector(fold_scalars(a_left, a_right, alpha, alpha_inv));
         witness.b = Vector(fold_scalars(b_left, b_right, alpha_inv, alpha));
@@ -101,8 +104,8 @@ pub fn verify_naive<G: CurveGroup>(
     statement: &Statement<G>,
 ) -> ProofResult<()> {
     let mut n = crs.size();
-    let mut g = crs.g.clone();
-    let mut h = crs.h.clone();
+    let mut gs = crs.gs.clone();
+    let mut hs = crs.hs.clone();
     let mut statement = statement.clone();
 
     while n != 1 {
@@ -111,10 +114,10 @@ pub fn verify_naive<G: CurveGroup>(
         let [alpha]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
         let alpha_inv = alpha.inverse().expect("non-zero alpha");
         {
-            let (g_left, g_right) = g.split_at(n);
-            let (h_left, h_right) = h.split_at(n);
-            g = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
-            h = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
+            let (g_left, g_right) = gs.split_at(n);
+            let (h_left, h_right) = hs.split_at(n);
+            gs = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
+            hs = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
         }
         statement.p += left * alpha.square() + right * alpha_inv.square();
     }
@@ -122,7 +125,7 @@ pub fn verify_naive<G: CurveGroup>(
     let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
     let c = a * b;
 
-    if (g[0] * a + h[0] * b + crs.u * c - statement.p).is_zero() {
+    if (gs[0] * a + hs[0] * b + crs.u * c - statement.p).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -175,8 +178,8 @@ where
             ss_inverse
         };
 
-        G::msm_unchecked(&crs.g, &ss).mul(a)
-            + G::msm_unchecked(&crs.h, &ss_inverse).mul(b)
+        G::msm_unchecked(&crs.gs, &ss).mul(a)
+            + G::msm_unchecked(&crs.hs, &ss_inverse).mul(b)
             + crs.u.mul(a * b)
     };
 
@@ -197,7 +200,7 @@ where
 
 #[cfg(test)]
 mod tests_proof {
-    use crate::types::{CrsSize, statement};
+    use crate::ipa::types::{CrsSize, statement};
 
     use super::*;
     use ark_secp256k1::{self, Projective};

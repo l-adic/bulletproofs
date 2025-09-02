@@ -1,10 +1,9 @@
-use std::ops::{Add, Mul};
-
 use ark_ec::CurveGroup;
 use ark_ff::{Field, UniformRand};
 use proptest::prelude::*;
 use rand::rngs::OsRng;
 use rayon::prelude::*;
+use std::ops::{Add, Mul};
 
 #[derive(Clone, Debug)]
 pub struct Vector<Fr>(pub Vec<Fr>);
@@ -20,7 +19,7 @@ impl<Fr: Field> Vector<Fr> {
 }
 
 impl<Fr: Field> Vector<Fr> {
-    fn add(&self, rhs: &Self) -> Vector<Fr> {
+    pub fn add(&self, rhs: &Self) -> Vector<Fr> {
         let mut result = Vec::new();
         for (a, b) in self.0.iter().zip(rhs.0.iter()) {
             result.push(*a + *b);
@@ -38,8 +37,8 @@ impl<Fr: Field> Vector<Fr> {
 
 #[derive(Clone, Debug)]
 pub struct CRS<G: CurveGroup> {
-    pub g: Vec<G::Affine>,
-    pub h: Vec<G::Affine>,
+    pub gs: Vec<G::Affine>,
+    pub hs: Vec<G::Affine>,
     pub u: G::Affine,
 }
 
@@ -64,20 +63,20 @@ impl Arbitrary for CrsSize {
 impl<G: CurveGroup> CRS<G> {
     pub fn rand(size: CrsSize) -> Self {
         let size = 1 << size.log2_size;
-        let g = (0..size)
+        let gs = (0..size)
             .into_par_iter()
             .map(|_| G::Affine::rand(&mut OsRng))
             .collect();
-        let h = (0..size)
+        let hs = (0..size)
             .into_par_iter()
             .map(|_| G::Affine::rand(&mut OsRng))
             .collect();
         let u = G::Affine::rand(&mut OsRng);
-        CRS { g, h, u }
+        CRS { gs, hs, u }
     }
 
     pub fn size(&self) -> usize {
-        self.g.len()
+        self.gs.len()
     }
 }
 
@@ -132,8 +131,8 @@ impl<G: CurveGroup> Add for Statement<G> {
 }
 
 pub fn statement<G: CurveGroup>(crs: &CRS<G>, inputs: &Witness<G::ScalarField>) -> Statement<G> {
-    let g: G = G::msm_unchecked(&crs.g, &inputs.a.0);
-    let h: G = G::msm_unchecked(&crs.h, &inputs.b.0);
+    let g: G = G::msm_unchecked(&crs.gs, &inputs.a.0);
+    let h: G = G::msm_unchecked(&crs.hs, &inputs.b.0);
     let p: G = g.add(&h).add(&crs.u.mul(inputs.c));
     Statement { p }
 }

@@ -1,6 +1,5 @@
 pub mod ipa;
-pub mod types;
-pub(crate) mod utils;
+pub mod range;
 
 #[cfg(test)]
 mod test {

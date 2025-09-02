@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use ark_secp256k1::Projective;
-use bulletproofs::{
-    ipa::{BulletproofDomainSeparator, prove, verify},
+use bulletproofs::ipa::{
+    BulletproofDomainSeparator, prove,
     types::{CRS, CrsSize, Witness, statement},
+    verify,
 };
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use spongefish::DomainSeparator;
