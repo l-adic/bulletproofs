@@ -79,19 +79,18 @@ fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &Range
     group.measurement_time(std::time::Duration::from_secs(30));
 
     let mut rng = OsRng;
-    let n = N;
 
     let domain_separator = {
         let domain_separator = DomainSeparator::new("range-benchmark");
         let domain_separator =
             RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
                 .ratchet();
-        RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
+        RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, N)
     };
 
     let mut proofs: HashMap<RangeStatement<N, Projective>, Vec<u8>> = HashMap::new();
 
-    let max_val = (1u64 << n) - 1;
+    let max_val = (1u64 << N) - 1;
     let v = Fr::from(rng.next_u64() % max_val.max(1));
     let witness = RangeWitness::<N, Fr>::new(v, &mut rng);
     let statement = RangeStatement::<N, Projective>::new(&crs, &witness);

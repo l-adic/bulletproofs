@@ -75,6 +75,14 @@ impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
     }
 }
 
+pub fn power_sequence<F: Field, const N: usize>(base: F) -> [F; N] {
+    let mut res = [F::one(); N];
+    for i in 1..N {
+        res[i] = res[i - 1] * base;
+    }
+    res
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
