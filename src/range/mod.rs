@@ -204,7 +204,7 @@ mod tests_range {
           #[test]
         fn test_range_proof(n in any::<u64>()) {
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(64 as usize);
+            let crs: CRS<Projective> = CRS::rand(64);
             let witness = Witness::<N, Fr>::new(Fr::from(n), &mut rng);
 
             let domain_separator = {
