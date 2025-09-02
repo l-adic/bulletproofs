@@ -5,11 +5,11 @@ use crate::{
     ipa::utils::dot,
     range::{
         types::{CRS, Statement, Witness},
-        utils::{VectorPolynomial, bit_decomposition},
+        utils::{VectorPolynomial, bit_decomposition, power_sequence},
     },
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, UniformRand, Zero};
+use ark_ff::{Field, One, UniformRand, Zero, batch_inversion};
 use spongefish::codecs::arkworks_algebra::FieldToUnitDeserialize;
 use spongefish::codecs::arkworks_algebra::FieldToUnitSerialize;
 use spongefish::codecs::arkworks_algebra::GroupToUnitDeserialize;
@@ -58,6 +58,9 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
 ) -> ProofResult<Vec<u8>> {
     assert!(crs.size() >= N, "CRS size is smaller than witness nbits");
 
+    let one_vec = &crs.one_vec[0..N];
+    let two_vec = &crs.two_vec[0..N];
+
     let a_l: [G::ScalarField; N] = {
         let mut bits = bit_decomposition(witness.v);
         bits.resize(N, G::ScalarField::zero());
@@ -79,18 +82,16 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
         + G::msm_unchecked(&crs.hs[0..N], &s_r);
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
-    let y_vec: [G::ScalarField; N] = array::from_fn(|i| y.pow([i as u64]));
+    let y_vec: [G::ScalarField; N] = power_sequence(y);
 
     let l_poly = {
-        let coeffs = vec![array::from_fn(|i| a_l[i] - crs.one_vec[i] * z), s_l];
+        let coeffs = vec![array::from_fn(|i| a_l[i] - one_vec[i] * z), s_l];
         VectorPolynomial { coeffs }
     };
 
     let r_poly = {
         let coeffs = vec![
-            array::from_fn(|i| {
-                (y_vec[i] * (a_r[i] + crs.one_vec[i] * z)) + crs.two_vec[i] * z.square()
-            }),
+            array::from_fn(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square()),
             array::from_fn(|i| y_vec[i] * s_r[i]),
         ];
         VectorPolynomial { coeffs }
@@ -135,14 +136,21 @@ pub fn verify<G: CurveGroup, const N: usize>(
     let l: [G::ScalarField; N] = verifier_state.next_scalars()?;
     let r: [G::ScalarField; N] = verifier_state.next_scalars()?;
 
-    let y_vec: [G::ScalarField; N] = array::from_fn(|i| y.pow([i as u64]));
+    let one_vec = &crs.one_vec[0..N];
+    let two_vec = &crs.two_vec[0..N];
+    let y_vec: [G::ScalarField; N] = power_sequence(y);
 
     let delta_y_z = {
         let z_cubed = z * z.square();
-        (z - z.square()) * dot(&crs.one_vec, &y_vec) - z_cubed * dot(&crs.one_vec, &crs.two_vec)
+        (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
     };
     let hs: Vec<G::Affine> = {
-        let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y.inverse().unwrap().pow([i as u64])));
+        let y_inv_vec = {
+            let mut ys = y_vec;
+            batch_inversion(&mut ys);
+            ys
+        };
+        let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y_inv_vec[i]));
         G::normalize_batch(&hs)
     };
 
@@ -159,20 +167,18 @@ pub fn verify<G: CurveGroup, const N: usize>(
     };
 
     {
-        let p: G = {
-            let hs_exp: [G::ScalarField; N] =
-                array::from_fn(|i| (z * y_vec[i]) + z.square() * crs.two_vec[i]);
-            let minus_z_times_one_vec = crs.one_vec.iter().map(|x| -z * x).collect::<Vec<_>>();
+        let lhs: G = {
+            let hs_scalars: [G::ScalarField; N] =
+                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i] - r[i]);
+            let gs_scalars: [G::ScalarField; N] = array::from_fn(|i| -z - l[i]);
             a + s.mul(x)
-                + G::msm_unchecked(&crs.gs[0..N], &minus_z_times_one_vec)
-                + G::msm_unchecked(&hs, &hs_exp)
+                + G::msm_unchecked(&crs.gs[0..N], &gs_scalars)
+                + G::msm_unchecked(&hs, &hs_scalars)
         };
-
-        let rhs = crs.h.mul(mu) + G::msm_unchecked(&crs.gs[0..N], &l) + G::msm_unchecked(&hs, &r);
-
+        let rhs = crs.h.mul(mu);
         assert!(
-            (p - rhs).is_zero(),
-            "Failed to verify inner product relation, i.e. p {p:?} != rhs {rhs:?}"
+            (lhs - rhs).is_zero(),
+            "Failed to verify inner product relation"
         );
     };
 
