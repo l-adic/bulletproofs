@@ -53,15 +53,10 @@ where
 pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     mut prover_state: ProverState,
     crs: &CRS<G>,
-    _statement: &Statement<N, G>,
     witness: &Witness<N, G::ScalarField>,
     rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
     assert!(crs.size() >= N, "CRS size is smaller than witness nbits");
-
-    let one_vec: [G::ScalarField; N] = [G::ScalarField::one(); N];
-    let two_vec: [G::ScalarField; N] =
-        array::from_fn(|i| G::ScalarField::from(2u64).pow([i as u64]));
 
     let a_l: [G::ScalarField; N] = {
         let mut bits = bit_decomposition(witness.v);
@@ -87,13 +82,15 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     let y_vec: [G::ScalarField; N] = array::from_fn(|i| y.pow([i as u64]));
 
     let l_poly = {
-        let coeffs = vec![array::from_fn(|i| a_l[i] - one_vec[i] * z), s_l];
+        let coeffs = vec![array::from_fn(|i| a_l[i] - crs.one_vec[i] * z), s_l];
         VectorPolynomial { coeffs }
     };
 
     let r_poly = {
         let coeffs = vec![
-            array::from_fn(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square()),
+            array::from_fn(|i| {
+                (y_vec[i] * (a_r[i] + crs.one_vec[i] * z)) + crs.two_vec[i] * z.square()
+            }),
             array::from_fn(|i| y_vec[i] * s_r[i]),
         ];
         VectorPolynomial { coeffs }
@@ -138,14 +135,11 @@ pub fn verify<G: CurveGroup, const N: usize>(
     let l: [G::ScalarField; N] = verifier_state.next_scalars()?;
     let r: [G::ScalarField; N] = verifier_state.next_scalars()?;
 
-    let one_vec = [G::ScalarField::one(); N];
-    let two_vec: [G::ScalarField; N] =
-        array::from_fn(|i| G::ScalarField::from(2u64).pow([i as u64]));
     let y_vec: [G::ScalarField; N] = array::from_fn(|i| y.pow([i as u64]));
 
     let delta_y_z = {
         let z_cubed = z * z.square();
-        (z - z.square()) * dot(&one_vec, &y_vec) - z_cubed * dot(&one_vec, &two_vec)
+        (z - z.square()) * dot(&crs.one_vec, &y_vec) - z_cubed * dot(&crs.one_vec, &crs.two_vec)
     };
     let hs: Vec<G::Affine> = {
         let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y.inverse().unwrap().pow([i as u64])));
@@ -167,8 +161,8 @@ pub fn verify<G: CurveGroup, const N: usize>(
     {
         let p: G = {
             let hs_exp: [G::ScalarField; N] =
-                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i]);
-            let minus_z_times_one_vec = one_vec.map(|x| -z * x);
+                array::from_fn(|i| (z * y_vec[i]) + z.square() * crs.two_vec[i]);
+            let minus_z_times_one_vec = crs.one_vec.iter().map(|x| -z * x).collect::<Vec<_>>();
             a + s.mul(x)
                 + G::msm_unchecked(&crs.gs[0..N], &minus_z_times_one_vec)
                 + G::msm_unchecked(&hs, &hs_exp)
@@ -193,7 +187,6 @@ pub fn verify<G: CurveGroup, const N: usize>(
 mod tests_range {
     use super::*;
     use ark_secp256k1::{Fr, Projective};
-    use ark_std::UniformRand;
     use rand::rngs::OsRng;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
@@ -202,16 +195,7 @@ mod tests_range {
     fn test_range_proof() {
         let n = 16;
         let mut rng = OsRng;
-        let crs: CRS<Projective> = CRS {
-            gs: (0..n)
-                .map(|_| Projective::rand(&mut rng).into_affine())
-                .collect(),
-            hs: (0..n)
-                .map(|_| Projective::rand(&mut rng).into_affine())
-                .collect(),
-            g: Projective::rand(&mut rng).into_affine(),
-            h: Projective::rand(&mut rng).into_affine(),
-        };
+        let crs: CRS<Projective> = CRS::rand(n);
         let v = Fr::from(1234u64);
         let witness = Witness::<16, Fr>::new(v, &mut rng);
 
@@ -232,7 +216,7 @@ mod tests_range {
         prover_state.public_points(&[statement.v]).unwrap();
         prover_state.ratchet().unwrap();
 
-        let proof = prove(prover_state, &crs, &statement, &witness, &mut rng).unwrap();
+        let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
 
         let mut verifier_state = domain_separator.to_verifier_state(&proof);
         verifier_state
