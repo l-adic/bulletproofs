@@ -1,0 +1,42 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install critcmp
+      run: cargo install critcmp
+    
+    - name: Run benchmarks on main branch (baseline)
+      run: |
+        git checkout main
+        cargo bench --bench bulletproof_bench -- --save-baseline main
+    
+    - name: Run benchmarks on current branch
+      run: |
+        git checkout ${{ github.sha }}
+        cargo bench --bench bulletproof_bench -- --save-baseline current
+    
+    - name: Compare benchmarks
+      run: |
+        critcmp main current --threshold 10
+        if [ $? -ne 0 ]; then
+          echo "Performance regression detected (>10% slowdown)"
+          exit 1
+        fi
