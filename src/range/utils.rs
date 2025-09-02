@@ -51,14 +51,11 @@ impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
             "Vector polynomials must have the same degree"
         );
         let degree = self.coeffs.len() - 1;
-        println!("Degree: {}", degree);
         let mut result_coeffs = vec![Fr::zero(); (2 * degree) + 1];
-        print!("result_coeffs len: {}\n", result_coeffs.len());
 
         for i in 0..=degree {
             for j in 0..=i {
                 let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
-                println!("i: {}, j: {}, dot_product: {:?}", i, j, dot_product);
                 result_coeffs[i + j] += dot_product;
             }
         }

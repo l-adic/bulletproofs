@@ -57,7 +57,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     witness: &Witness<N, G::ScalarField>,
     rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
-    println!("N: {N}, crs size: {}", crs.size());
     assert!(crs.size() >= N, "CRS size is smaller than witness nbits");
 
     let one_vec: [G::ScalarField; N] = [G::ScalarField::one(); N];
@@ -84,7 +83,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
             recomposed == witness.v,
             "bit decomposition does not recompose to witness v"
         );
-        println!("Witness sanity checks pass");
         bits.try_into().unwrap()
     };
 
@@ -118,10 +116,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
         VectorPolynomial { coeffs }
     };
 
-    println! {"l_poly len: {}, r_poly len: {}", l_poly.coeffs.len(), r_poly.coeffs.len()};
     let t_poly = l_poly.inner_product(&r_poly);
-
-    println!("computed t_poly");
 
     let tao1: G::ScalarField = UniformRand::rand(rng);
     let tao2: G::ScalarField = UniformRand::rand(rng);
@@ -144,12 +139,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     }
     let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
     let mu = alpha + rho * x;
-
-    let tt1 = tt1.into_affine();
-    let tt2 = tt2.into_affine();
-    println!(
-        "Prover: t_hat: {t_hat:?},\ntao_x: {tao_x:?},\ny: {y:?},\nz: {z:?},\nx: {x:?},\ntt1: {tt1:?},\ntt2: {tt2:?}"
-    );
 
     prover_state.add_scalars(&[tao_x, mu, t_hat])?;
     prover_state.add_scalars(&l)?;
@@ -189,9 +178,6 @@ pub fn verify<G: CurveGroup, const N: usize>(
     {
         let tt1 = tt1.into_affine();
         let tt2 = tt2.into_affine();
-        println!(
-            "Verifier: t_hat: {t_hat:?},\ntao_x: {tao_x:?},\ny: {y:?},\nz: {z:?},\nx: {x:?},\ntt1: {tt1:?},\ntt2: {tt2:?}"
-        );
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
         let rhs =
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square());
@@ -253,7 +239,6 @@ mod tests_range {
         let v = Fr::from(1234u64);
         let witness = Witness::<16, Fr>::new(v, n, &mut rng);
 
-        println!("Creating domain separator");
         let domain_separator = {
             let domain_separator = DomainSeparator::new("test-range-proof");
             // add the IO of the bulletproof statement
@@ -263,19 +248,15 @@ mod tests_range {
             // add the IO of the bulletproof protocol (the transcript)
             RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
         };
-        println!("domain separator: {domain_separator:#?}");
 
         let mut prover_state = domain_separator.to_prover_state();
 
-        println!("prover state: {prover_state:#?}");
         let statement = Statement::new(&crs, &witness);
 
-        println!("statement: {statement:?}");
 
         prover_state.public_points(&[statement.v]).unwrap();
         prover_state.ratchet().unwrap();
 
-        println!("prover state: {prover_state:#?}");
 
         let proof = prove(prover_state, &crs, &statement, &witness, &mut rng).unwrap();
 
