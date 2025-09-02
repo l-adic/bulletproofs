@@ -30,12 +30,9 @@ impl<const N: usize, Fr: Field> VectorPolynomial<N, Fr> {
         Fr: PrimeField,
     {
         let mut coeffs = Vec::with_capacity(degree + 1);
+        let mut rng = ark_std::rand::thread_rng();
         for _ in 0..=degree {
-            let mut coeff = [Fr::zero(); N];
-            for i in 0..N {
-                coeff[i] = Fr::rand(&mut ark_std::rand::thread_rng());
-            }
-            coeffs.push(coeff);
+            coeffs.push(std::array::from_fn(|_| Fr::rand(&mut rng)));
         }
         Self { coeffs }
     }

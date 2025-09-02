@@ -74,7 +74,7 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
 }
 
 fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &RangeCRS<Projective>) {
-    let mut group = c.benchmark_group(&format!("range_{}", N));
+    let mut group = c.benchmark_group(format!("range_{}", N));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
@@ -93,7 +93,7 @@ fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &Range
     let max_val = (1u64 << N) - 1;
     let v = Fr::from(rng.next_u64() % max_val.max(1));
     let witness = RangeWitness::<N, Fr>::new(v, &mut rng);
-    let statement = RangeStatement::<N, Projective>::new(&crs, &witness);
+    let statement = RangeStatement::<N, Projective>::new(crs, &witness);
 
     // Benchmark prove
     group.bench_with_input(BenchmarkId::new("prove", N), &N, |b, _| {
@@ -102,7 +102,7 @@ fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &Range
             prover_state.public_points(&[statement.v]).unwrap();
             prover_state.ratchet().unwrap();
             let proof =
-                range_prove::<Projective, _, N>(prover_state, &crs, &witness, &mut rng).unwrap();
+                range_prove::<Projective, _, N>(prover_state, crs, &witness, &mut rng).unwrap();
             proofs.insert(statement, proof.clone());
             black_box(proof)
         })
@@ -115,8 +115,8 @@ fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &Range
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v]).unwrap();
             verifier_state.ratchet().unwrap();
-            let result = range_verify::<Projective, N>(verifier_state, &crs, &statement).unwrap();
-            black_box(result)
+            range_verify::<Projective, N>(verifier_state, crs, &statement).unwrap();
+            black_box(())
         })
     });
 
@@ -133,5 +133,5 @@ fn bench_range_proofs(c: &mut Criterion) {
     bench_range_prove_verify_cycle::<64>(c, &shared_crs);
 }
 
-criterion_group!(benches, bench_range_proofs);
+criterion_group!(benches, bench_ipa_prove_verify_cycle, bench_range_proofs);
 criterion_main!(benches);

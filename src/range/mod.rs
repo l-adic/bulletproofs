@@ -193,42 +193,45 @@ pub fn verify<G: CurveGroup, const N: usize>(
 mod tests_range {
     use super::*;
     use ark_secp256k1::{Fr, Projective};
+    use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
-    // test that we can construct a range proof for N = 16
-    #[test]
-    fn test_range_proof() {
-        let n = 16;
-        let mut rng = OsRng;
-        let crs: CRS<Projective> = CRS::rand(n);
-        let v = Fr::from(1234u64);
-        let witness = Witness::<16, Fr>::new(v, &mut rng);
+    const N: usize = 64;
 
-        let domain_separator = {
-            let domain_separator = DomainSeparator::new("test-range-proof");
-            // add the IO of the bulletproof statement
-            let domain_separator =
-                RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
-                    .ratchet();
-            // add the IO of the bulletproof protocol (the transcript)
-            RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
-        };
+    proptest! {
+          #![proptest_config(Config::with_cases(2))]
+          #[test]
+        fn test_range_proof(n in any::<u64>()) {
+            let mut rng = OsRng;
+            let crs: CRS<Projective> = CRS::rand(64);
+            let witness = Witness::<N, Fr>::new(Fr::from(n), &mut rng);
 
-        let mut prover_state = domain_separator.to_prover_state();
+            let domain_separator = {
+                let domain_separator = DomainSeparator::new("test-range-proof");
+                // add the IO of the bulletproof statement
+                let domain_separator =
+                    RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
+                        .ratchet();
+                // add the IO of the bulletproof protocol (the transcript)
+                RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, N)
+            };
 
-        let statement = Statement::new(&crs, &witness);
+            let mut prover_state = domain_separator.to_prover_state();
 
-        prover_state.public_points(&[statement.v]).unwrap();
-        prover_state.ratchet().unwrap();
+            let statement = Statement::new(&crs, &witness);
 
-        let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
+            prover_state.public_points(&[statement.v]).unwrap();
+            prover_state.ratchet().unwrap();
 
-        let mut verifier_state = domain_separator.to_verifier_state(&proof);
-        verifier_state
-            .public_points(&[statement.v])
-            .expect("cannot add statment");
-        verifier_state.ratchet().expect("failed to wratchet");
-        verify(verifier_state, &crs, &statement).expect("proof should verify")
+            let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
+
+            let mut verifier_state = domain_separator.to_verifier_state(&proof);
+            verifier_state
+                .public_points(&[statement.v])
+                .expect("cannot add statment");
+            verifier_state.ratchet().expect("failed to wratchet");
+            verify(verifier_state, &crs, &statement).expect("proof should verify")
+        }
     }
 }
