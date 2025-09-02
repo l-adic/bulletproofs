@@ -2,17 +2,16 @@ use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, PrimeField};
 use std::ops::Mul;
 
-use crate::ipa::{self};
-
 pub struct CRS<G: CurveGroup> {
-    pub ipa_crs: ipa::types::CRS<G>,
+    pub gs: Vec<G::Affine>,
+    pub hs: Vec<G::Affine>,
     pub g: G::Affine,
     pub h: G::Affine,
 }
 
 impl<G: CurveGroup> CRS<G> {
     pub fn size(&self) -> usize {
-        self.ipa_crs.size()
+        self.gs.len()
     }
 }
 
@@ -22,8 +21,8 @@ pub struct Witness<const N: usize, Fr> {
 }
 
 impl<Fr: PrimeField, const N: usize> Witness<N, Fr> {
-    pub fn new<Rng: rand::Rng>(v: Fr, n: usize, rng: &mut Rng) -> Self {
-        assert!(v.into_bigint().num_bits() as usize <= n);
+    pub fn new<Rng: rand::Rng>(v: Fr, rng: &mut Rng) -> Self {
+        assert!(v.into_bigint().num_bits() as usize <= N);
         Witness {
             v,
             gamma: Fr::rand(rng),

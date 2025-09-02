@@ -66,23 +66,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     let a_l: [G::ScalarField; N] = {
         let mut bits = bit_decomposition(witness.v);
         bits.resize(N, G::ScalarField::zero());
-        assert!(bits.len() == N, "bit decomposition length is not N");
-        assert!(
-            bits.iter()
-                .all(|b| *b == G::ScalarField::zero() || *b == G::ScalarField::one()),
-            "bit decomposition contains non-binary values"
-        );
-        //assert bits recompose to witness v
-        let recomposed: G::ScalarField = bits
-            .iter()
-            .enumerate()
-            .fold(G::ScalarField::zero(), |acc, (i, b)| {
-                acc + *b * G::ScalarField::from(2u64).pow([i as u64])
-            });
-        assert!(
-            recomposed == witness.v,
-            "bit decomposition does not recompose to witness v"
-        );
         bits.try_into().unwrap()
     };
 
@@ -90,15 +73,15 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha)
-        + G::msm_unchecked(&crs.ipa_crs.gs[0..N], &a_l)
-        + G::msm_unchecked(&crs.ipa_crs.hs[0..N], &a_r);
+        + G::msm_unchecked(&crs.gs[0..N], &a_l)
+        + G::msm_unchecked(&crs.hs[0..N], &a_r);
     let s_l: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
     let s_r: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
 
     let rho: G::ScalarField = UniformRand::rand(rng);
     let s = crs.h.mul(rho)
-        + G::msm_unchecked(&crs.ipa_crs.gs[0..N], &s_l)
-        + G::msm_unchecked(&crs.ipa_crs.hs[0..N], &s_r);
+        + G::msm_unchecked(&crs.gs[0..N], &s_l)
+        + G::msm_unchecked(&crs.hs[0..N], &s_r);
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
     let y_vec: [G::ScalarField; N] = array::from_fn(|i| y.pow([i as u64]));
@@ -132,11 +115,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     let r: [G::ScalarField; N] = r_poly.evaluate(x);
     let t_hat = dot(&l, &r);
 
-    {
-        // assert that t_hat = t(x) = <l(x), r(x)>
-        let t_x = t_poly[0] + t_poly[1] * x + t_poly[2] * x.square();
-        assert!(t_hat == t_x, "t_hat does not equal t(x)");
-    }
     let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
     let mu = alpha + rho * x;
 
@@ -170,8 +148,7 @@ pub fn verify<G: CurveGroup, const N: usize>(
         (z - z.square()) * dot(&one_vec, &y_vec) - z_cubed * dot(&one_vec, &two_vec)
     };
     let hs: Vec<G::Affine> = {
-        let hs: [G; N] =
-            array::from_fn(|i| crs.ipa_crs.hs[i].mul(y.inverse().unwrap().pow([i as u64])));
+        let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y.inverse().unwrap().pow([i as u64])));
         G::normalize_batch(&hs)
     };
 
@@ -183,7 +160,7 @@ pub fn verify<G: CurveGroup, const N: usize>(
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square());
         assert!(
             (lhs - rhs).is_zero(),
-            "Failed to verify t_hat = t(x) = t_0 + t_1 x + t_2 x^2, i.e. lhs {lhs:?} != rhs {rhs:?}"
+            "Failed to verify t_hat = t(x) = t_0 + t_1 x + t_2 x^2"
         );
     };
 
@@ -193,12 +170,11 @@ pub fn verify<G: CurveGroup, const N: usize>(
                 array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i]);
             let minus_z_times_one_vec = one_vec.map(|x| -z * x);
             a + s.mul(x)
-                + G::msm_unchecked(&crs.ipa_crs.gs[0..N], &minus_z_times_one_vec)
+                + G::msm_unchecked(&crs.gs[0..N], &minus_z_times_one_vec)
                 + G::msm_unchecked(&hs, &hs_exp)
         };
 
-        let rhs =
-            crs.h.mul(mu) + G::msm_unchecked(&crs.ipa_crs.gs[0..N], &l) + G::msm_unchecked(&hs, &r);
+        let rhs = crs.h.mul(mu) + G::msm_unchecked(&crs.gs[0..N], &l) + G::msm_unchecked(&hs, &r);
 
         assert!(
             (p - rhs).is_zero(),
@@ -215,8 +191,6 @@ pub fn verify<G: CurveGroup, const N: usize>(
 
 #[cfg(test)]
 mod tests_range {
-    use crate::ipa;
-
     use super::*;
     use ark_secp256k1::{Fr, Projective};
     use ark_std::UniformRand;
@@ -228,16 +202,18 @@ mod tests_range {
     fn test_range_proof() {
         let n = 16;
         let mut rng = OsRng;
-        let ipa_crs: ipa::types::CRS<Projective> = ipa::types::CRS::rand(ipa::types::CrsSize {
-            log2_size: n as u64,
-        });
-        let crs = CRS {
-            ipa_crs,
+        let crs: CRS<Projective> = CRS {
+            gs: (0..n)
+                .map(|_| Projective::rand(&mut rng).into_affine())
+                .collect(),
+            hs: (0..n)
+                .map(|_| Projective::rand(&mut rng).into_affine())
+                .collect(),
             g: Projective::rand(&mut rng).into_affine(),
             h: Projective::rand(&mut rng).into_affine(),
         };
         let v = Fr::from(1234u64);
-        let witness = Witness::<16, Fr>::new(v, n, &mut rng);
+        let witness = Witness::<16, Fr>::new(v, &mut rng);
 
         let domain_separator = {
             let domain_separator = DomainSeparator::new("test-range-proof");
@@ -253,10 +229,8 @@ mod tests_range {
 
         let statement = Statement::new(&crs, &witness);
 
-
         prover_state.public_points(&[statement.v]).unwrap();
         prover_state.ratchet().unwrap();
-
 
         let proof = prove(prover_state, &crs, &statement, &witness, &mut rng).unwrap();
 

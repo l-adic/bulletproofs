@@ -54,7 +54,7 @@ impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
         let mut result_coeffs = vec![Fr::zero(); (2 * degree) + 1];
 
         for i in 0..=degree {
-            for j in 0..=i {
+            for j in 0..=degree {
                 let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
                 result_coeffs[i + j] += dot_product;
             }
@@ -88,6 +88,14 @@ mod tests {
       fn test_bit_decomposition( x in prop::strategy::Just(Fr::rand(&mut ark_std::rand::thread_rng())))
         {
             let bits = bit_decomposition(x);
+            // assert all bits are either 0 or 1
+            for b in &bits {
+                prop_assert!(*b == Fr::zero() || *b == Fr::one());
+            }
+            // assert that the length is the modulus bit size
+            prop_assert_eq!(bits.len(), Fr::MODULUS_BIT_SIZE as usize);
+
+            // assrt that reconstructing the field element from its bits gives the original element
             let mut power_of_2 = Fr::one();
             let reconstructed = bits.iter().fold(Fr::zero(), |acc, b| {
                 let result = acc + (*b * power_of_2);
