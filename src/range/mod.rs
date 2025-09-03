@@ -36,20 +36,18 @@ where
     G: CurveGroup,
     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
 {
-    /// The IO of the range proof statement
     fn range_proof_statement(self) -> Self {
         self.add_points(1, "Range proof statement")
     }
 
-    /// The IO of the range proof protocol
     fn add_range_proof(mut self, n: usize) -> Self {
         self = self
             .add_points(2, "round-message: A, S")
             .challenge_scalars(2, "challenge [y,z]")
             .add_points(2, "round-message: T1, T2")
             .challenge_scalars(1, "challenge x")
-            .add_extended_bulletproof(n)
-            .add_scalars(3, "round-message: t_x, mu, t_hat");
+            .add_scalars(3, "round-message: t_x, mu, t_hat")
+            .add_extended_bulletproof(n);
         self
     }
 }
@@ -116,7 +114,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
     let mu = alpha + rho * x;
 
-    let t_hat = {
+    {
         let l: [G::ScalarField; N] = l_poly.evaluate(x);
         let r: [G::ScalarField; N] = r_poly.evaluate(x);
 
@@ -124,22 +122,21 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
             ipa_types::Witness::new(ipa_types::Vector(l.to_vec()), ipa_types::Vector(r.to_vec()));
 
         let hs_prime = create_hs_prime(crs, y_vec);
-        let extended_statement: ExtendedStatement<G> = {
-            let mut s = ipa::extended::extended_statement(&crs.gs[0..N], &hs_prime, &witness);
-            s.p += crs.h.mul(mu);
-            s
-        };
+
+        let mut extended_statement: ExtendedStatement<G> =
+            ipa::extended::extended_statement(&crs.gs[0..N], &hs_prime, &witness);
+
+        extended_statement.p += crs.h.mul(-mu);
+
+        prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
         let ipa_crs = ipa_types::CRS {
             gs: crs.gs[0..N].to_vec(),
             hs: hs_prime,
             u: crs.u,
         };
 
-        extended::prove(&mut prover_state, &ipa_crs, &extended_statement, &witness)?;
-        ProofResult::Ok(witness.c())
+        extended::prove(&mut prover_state, &ipa_crs, &extended_statement, &witness)
     }?;
-
-    prover_state.add_scalars(&[tao_x, mu, t_hat])?;
 
     Ok(prover_state.narg_string().to_vec())
 }
@@ -167,48 +164,53 @@ pub fn verify<G: CurveGroup, const N: usize>(
     let [tt1, tt2]: [G; 2] = verifier_state.next_points()?;
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
-    let l: [G::ScalarField; N] = verifier_state.next_scalars()?;
-    let r: [G::ScalarField; N] = verifier_state.next_scalars()?;
 
     let one_vec = &crs.one_vec[0..N];
     let two_vec = &crs.two_vec[0..N];
     let y_vec: [G::ScalarField; N] = power_sequence(y);
 
-    let delta_y_z = {
-        let z_cubed = z * z.square();
-        (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
-    };
-    let hs_prime = create_hs_prime(crs, y_vec);
-
     {
+        let tt1 = tt1.into_affine();
+        let tt2 = tt2.into_affine();
+
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
-        let rhs =
-            statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square());
+        let rhs = {
+            let delta_y_z = {
+                let z_cubed = z * z.square();
+                (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
+            };
+
+            statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
+        };
         assert!(
             (lhs - rhs).is_zero(),
             "Failed to verify t_hat = t(x) = t_0 + t_1 x + t_2 x^2"
         );
     };
 
-    {
-        let lhs: G = {
-            let hs_scalars: [G::ScalarField; N] =
-                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i] - r[i]);
-            let gs_scalars: [G::ScalarField; N] = array::from_fn(|i| -z - l[i]);
-            a + s.mul(x)
-                + G::msm_unchecked(&crs.gs[0..N], &gs_scalars)
-                + G::msm_unchecked(&hs_prime, &hs_scalars)
-        };
-        let rhs = crs.h.mul(mu);
-        assert!(
-            (lhs - rhs).is_zero(),
-            "Failed to verify inner product relation"
-        );
-    };
+    let hs_prime = create_hs_prime(crs, y_vec);
 
     {
-        assert!(t_hat == dot(&l, &r), "t_hat does not equal <l,r>");
-    }
+        let p: G = {
+            let hs_scalars: [G::ScalarField; N] =
+                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i]);
+            a + s.mul(x)
+                + G::msm_unchecked(&crs.gs[0..N], &[-z; N])
+                + G::msm_unchecked(&hs_prime, &hs_scalars)
+        };
+
+        let extended_statement = ExtendedStatement {
+            p: p + crs.h.mul(-mu),
+            c: t_hat,
+        };
+
+        let ipa_crs = ipa_types::CRS {
+            gs: crs.gs[0..N].to_vec(),
+            hs: hs_prime,
+            u: crs.u,
+        };
+        extended::verify(verifier_state, &ipa_crs, &extended_statement)
+    }?;
 
     Ok(())
 }
@@ -249,6 +251,8 @@ mod tests_range {
             prover_state.ratchet().unwrap();
 
             let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
+
+            tracing::debug!("proof size: {} bytes", proof.len());
 
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state
