@@ -313,10 +313,8 @@ mod tests_proof {
           {
             let domain_separator = {
               let domain_separator = DomainSeparator::new("test-ipa");
-              // add the IO of the bulletproof statement
               let domain_separator =
                   BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
-              // add the IO of the bulletproof protocol (the transcript)
               BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size())
             };
 
@@ -330,12 +328,12 @@ mod tests_proof {
 
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-            verifier_state.ratchet().expect("failed to wratchet");
+            verifier_state.ratchet().expect("failed to ratchet");
             verify_naive(verifier_state, &crs, &statement).expect("proof should verify");
 
             let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
             fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-            fast_verifier_state.ratchet().expect("failed to wratchet");
+            fast_verifier_state.ratchet().expect("failed to ratchet");
             verify(fast_verifier_state, &crs, &statement).expect("proof should verify");
           }
 
@@ -363,7 +361,7 @@ mod tests_proof {
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state.public_points(&[statement.p]).expect("cannot add statment");
             verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
-            verifier_state.ratchet().expect("failed to wratchet");
+            verifier_state.ratchet().expect("failed to ratchet");
             extended::verify(verifier_state, &crs, &statement).expect("proof should verify");
 
           }

@@ -258,7 +258,7 @@ mod tests_range {
             verifier_state
                 .public_points(&[statement.v])
                 .expect("cannot add statment");
-            verifier_state.ratchet().expect("failed to wratchet");
+            verifier_state.ratchet().expect("failed to ratchet");
             verify(verifier_state, &crs, &statement).expect("proof should verify")
         }
     }
