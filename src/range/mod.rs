@@ -123,6 +123,19 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     Ok(prover_state.narg_string().to_vec())
 }
 
+fn create_hs_prime<G: CurveGroup, const N: usize>(
+    crs: &CRS<G>,
+    y_vec: [G::ScalarField; N],
+) -> Vec<G::Affine> {
+    let y_inv_vec = {
+        let mut ys = y_vec;
+        batch_inversion(&mut ys);
+        ys
+    };
+    let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y_inv_vec[i]));
+    G::normalize_batch(&hs)
+}
+
 pub fn verify<G: CurveGroup, const N: usize>(
     mut verifier_state: spongefish::VerifierState,
     crs: &CRS<G>,
@@ -144,15 +157,7 @@ pub fn verify<G: CurveGroup, const N: usize>(
         let z_cubed = z * z.square();
         (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
     };
-    let hs: Vec<G::Affine> = {
-        let y_inv_vec = {
-            let mut ys = y_vec;
-            batch_inversion(&mut ys);
-            ys
-        };
-        let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y_inv_vec[i]));
-        G::normalize_batch(&hs)
-    };
+    let hs_prime= create_hs_prime(crs, y_vec);
 
     {
         let tt1 = tt1.into_affine();
@@ -173,7 +178,7 @@ pub fn verify<G: CurveGroup, const N: usize>(
             let gs_scalars: [G::ScalarField; N] = array::from_fn(|i| -z - l[i]);
             a + s.mul(x)
                 + G::msm_unchecked(&crs.gs[0..N], &gs_scalars)
-                + G::msm_unchecked(&hs, &hs_scalars)
+                + G::msm_unchecked(&hs_prime, &hs_scalars)
         };
         let rhs = crs.h.mul(mu);
         assert!(

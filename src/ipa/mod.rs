@@ -15,7 +15,7 @@ use std::ops::Mul;
 use tracing::instrument;
 
 use crate::ipa::{
-    types::{AugmentedStatement, CRS, Statement, Vector, Witness},
+    types::{CRS, Statement, Vector, Witness},
     utils::{dot, fold_generators, fold_scalars},
 };
 
@@ -198,82 +198,106 @@ where
     }
 }
 
-pub trait AugmentedBulletproofDomainSeparator<G: CurveGroup> {
-    fn augmented_bulletproof_statement(self) -> Self;
-    fn add_augmented_bulletproof(self, len: usize) -> Self;
+pub mod extended {
+
+  use ark_ec::CurveGroup;
+  use ark_ff::Field;
+  use spongefish::{
+      DomainSeparator, ProofResult, ProverState, VerifierState,
+      codecs::arkworks_algebra::{
+          FieldDomainSeparator, GroupDomainSeparator, UnitToField,
+      },
+  };
+  use std::ops::Mul;
+  
+  use crate::ipa::{self as ipa, types::{Statement, Witness, CRS}, BulletproofDomainSeparator};
+
+  pub struct ExtendedStatement<G: CurveGroup> {
+      pub p: G,
+      pub c: G::ScalarField,
+  }
+  
+  pub fn extended_statement<G: CurveGroup>(
+      gs: &[G::Affine],
+      hs: &[G::Affine],
+      inputs: &Witness<G::ScalarField>,
+  ) -> ExtendedStatement<G> {
+      let g = G::msm_unchecked(gs, &inputs.a.0);
+      let h = G::msm_unchecked(hs, &inputs.b.0);
+      let p = g.add(&h);
+      ExtendedStatement { p, c: inputs.c() }
+  }
+
+
+  pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
+      fn extended_bulletproof_statement(self) -> Self;
+      fn add_extended_bulletproof(self, len: usize) -> Self;
+  }
+  
+  impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
+  where
+      G: CurveGroup,
+      Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
+  {
+      /// The IO of the bulletproof statement
+      fn extended_bulletproof_statement(self) -> Self {
+          self.bulletproof_statement().add_scalars(1, "dot-product")
+      }
+  
+      /// The IO of the bulletproof protocol
+      fn add_extended_bulletproof(self, len: usize) -> Self {
+          self.challenge_scalars(1, "x").add_bulletproof(len)
+      }
+  }
+  
+  pub fn prove<G: CurveGroup>(
+      prover_state: &mut ProverState,
+      crs: &CRS<G>,
+      aug_statement: &ExtendedStatement<G>,
+      witness: &Witness<G::ScalarField>,
+  ) -> ProofResult<Vec<u8>> {
+      let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+      let statement = Statement {
+          p: aug_statement.p + crs.u.mul(x * aug_statement.c),
+      };
+      let crs_mod = CRS {
+          gs: crs.gs.clone(),
+          hs: crs.hs.clone(),
+          u: crs.u.clone().mul(x).into_affine(),
+      };
+      ipa::prove(prover_state, &crs_mod, &statement, witness)
+  }
+  
+  pub fn verify<G: CurveGroup>(
+      mut verifier_state: VerifierState,
+      crs: &CRS<G>,
+      aug_statement: &ExtendedStatement<G>,
+  ) -> ProofResult<()>
+  where
+      G::ScalarField: Field,
+  {
+      let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+      let statement = Statement {
+          p: aug_statement.p + crs.u.mul(x * aug_statement.c),
+      };
+      let crs_mod = CRS {
+          gs: crs.gs.clone(),
+          hs: crs.hs.clone(),
+          u: crs.u.clone().mul(x).into_affine(),
+      };
+      ipa::verify(verifier_state, &crs_mod, &statement)
+  }
 }
-
-impl<G> AugmentedBulletproofDomainSeparator<G> for DomainSeparator
-where
-    G: CurveGroup,
-    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-{
-    /// The IO of the bulletproof statement
-    fn augmented_bulletproof_statement(self) -> Self {
-        self.bulletproof_statement()
-            .add_scalars(1, "dot-product")
-    }
-
-    /// The IO of the bulletproof protocol
-    fn add_augmented_bulletproof(self, len: usize) -> Self {
-        self.challenge_scalars(1, "x")
-            .add_bulletproof(len)
-    }
-}
-
-
-
-pub fn prove_augmented<G: CurveGroup>(
-    prover_state: &mut ProverState,
-    crs: &CRS<G>,
-    aug_statement: &AugmentedStatement<G>,
-    witness: &Witness<G::ScalarField>,
-) -> ProofResult<Vec<u8>> {
-    let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
-    println!("x = {x}");
-    let statement = Statement {
-        p: aug_statement.p + crs.u.mul(x * aug_statement.c),
-    };
-    println!("Modified statement p = {}", statement.p);
-    let crs_mod = CRS {
-        gs: crs.gs.clone(),
-        hs: crs.hs.clone(),
-        u: crs.u.clone().mul(x).into_affine(),
-    };
-    prove(prover_state, &crs_mod, &statement, witness)
-}
-
-pub fn verify_augmented<G: CurveGroup>(
-    mut verifier_state: VerifierState,
-    crs: &CRS<G>,
-    aug_statement: &AugmentedStatement<G>,
-) -> ProofResult<()>
-where
-    G::ScalarField: Field,
-{
-    let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
-    println!("x = {x}");
-    let statement = Statement {
-        p: aug_statement.p + crs.u.mul(x * aug_statement.c),
-    };
-    println!("Modified statement p = {}", statement.p);
-    let crs_mod = CRS {
-        gs: crs.gs.clone(),
-        hs: crs.hs.clone(),
-        u: crs.u.clone().mul(x).into_affine(),
-    };
-    verify(verifier_state, &crs_mod, &statement)
-}
-
 #[cfg(test)]
 mod tests_proof {
-    use crate::ipa::types::{CrsSize, statement, augmented_statement};
-
+    use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
+    use crate::ipa::types::{CrsSize, statement};
     use super::*;
     use ark_secp256k1::{self, Projective};
     use proptest::{prelude::*, test_runner::Config};
     use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
+    use tracing::info;
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]
@@ -285,7 +309,7 @@ mod tests_proof {
           (crs, inputs)
       })) {
 
-          println!("Testing prove/verify with protocol (3)");
+          info!("Testing prove/verify with protocol (3)");
           {
             let domain_separator = {
               let domain_separator = DomainSeparator::new("test-ipa");
@@ -315,32 +339,32 @@ mod tests_proof {
             verify(fast_verifier_state, &crs, &statement).expect("proof should verify");
           }
 
-          println!("Testing prove/verify with protocol (2)");
+          info!("Testing prove/verify with protocol (2)");
           {
 
             let domain_separator = {
               let domain_separator = DomainSeparator::new("test-ipa");
               // add the IO of the bulletproof statement
               let domain_separator =
-                  AugmentedBulletproofDomainSeparator::<Projective>::augmented_bulletproof_statement(domain_separator).ratchet();
+                  ExtendedBulletproofDomainSeparator::<Projective>::extended_bulletproof_statement(domain_separator).ratchet();
               // add the IO of the bulletproof protocol (the transcript)
-              AugmentedBulletproofDomainSeparator::<Projective>::add_augmented_bulletproof(domain_separator, crs.size())
+              ExtendedBulletproofDomainSeparator::<Projective>::add_extended_bulletproof(domain_separator, crs.size())
             };
 
-            let aug_statement = augmented_statement(&crs.gs, &crs.hs, &inputs);
-            let mut aug_prover_state = domain_separator.to_prover_state();
-            aug_prover_state.public_points(&[aug_statement.p]).unwrap();
-            aug_prover_state.public_scalars(&[aug_statement.c]).unwrap();
-            aug_prover_state.ratchet().unwrap();
-            let proof = prove_augmented(&mut aug_prover_state, &crs, &aug_statement, &inputs).expect("proof should be generated");
+            let statement = extended::extended_statement(&crs.gs, &crs.hs, &inputs);
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&[statement.p]).unwrap();
+            prover_state.public_scalars(&[statement.c]).unwrap();
+            prover_state.ratchet().unwrap();
+            let proof = extended::prove(&mut prover_state, &crs, &statement, &inputs).expect("proof should be generated");
 
             println!("Got proof, verifying...");
 
-            let mut aug_verifier_state = domain_separator.to_verifier_state(&proof);
-            aug_verifier_state.public_points(&[aug_statement.p]).expect("cannot add statment");
-            aug_verifier_state.public_scalars(&[aug_statement.c]).expect("cannot add statment");
-            aug_verifier_state.ratchet().expect("failed to wratchet");
-            verify_augmented(aug_verifier_state, &crs, &aug_statement).expect("proof should verify");
+            let mut verifier_state = domain_separator.to_verifier_state(&proof);
+            verifier_state.public_points(&[statement.p]).expect("cannot add statment");
+            verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
+            verifier_state.ratchet().expect("failed to wratchet");
+            extended::verify(verifier_state, &crs, &statement).expect("proof should verify");
 
           }
 

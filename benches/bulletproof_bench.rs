@@ -50,7 +50,7 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
                 prover_state.public_points(&[stmt.p]).unwrap();
                 prover_state.ratchet().unwrap();
 
-                let proof = ipa_prove(prover_state, &crs, &stmt, &witness).unwrap();
+                let proof = ipa_prove(&mut prover_state, &crs, &stmt, &witness).unwrap();
                 proofs.insert(size, proof.clone());
                 black_box(proof)
             })
