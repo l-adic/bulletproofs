@@ -1,10 +1,11 @@
+use crate::ipa::{self, types::CrsSize};
 use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, Field, One, PrimeField};
+use ark_std::log2;
 use std::ops::Mul;
 
 pub struct CRS<G: CurveGroup> {
-    pub gs: Vec<G::Affine>,
-    pub hs: Vec<G::Affine>,
+    pub ipa_crs: ipa::types::CRS<G>,
     pub g: G::Affine,
     pub h: G::Affine,
     pub one_vec: Vec<G::ScalarField>,
@@ -15,8 +16,10 @@ impl<G: CurveGroup> CRS<G> {
     pub fn rand(n: usize) -> Self
 where {
         let mut rng = &mut rand::thread_rng();
-        let gs: Vec<G::Affine> = (0..n).map(|_| G::rand(&mut rng).into_affine()).collect();
-        let hs: Vec<G::Affine> = (0..n).map(|_| G::rand(&mut rng).into_affine()).collect();
+        let ipa_crs = {
+            let log2_size = log2(n) as u64;
+            ipa::types::CRS::rand(CrsSize { log2_size })
+        };
         let g = G::rand(&mut rng).into_affine();
         let h = G::rand(&mut rng).into_affine();
         let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n];
@@ -24,8 +27,7 @@ where {
             .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
             .collect();
         CRS {
-            gs,
-            hs,
+            ipa_crs,
             g,
             h,
             one_vec,
@@ -34,7 +36,7 @@ where {
     }
 
     pub fn size(&self) -> usize {
-        self.gs.len()
+        self.ipa_crs.size()
     }
 }
 

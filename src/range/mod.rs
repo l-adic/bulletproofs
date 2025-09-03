@@ -2,7 +2,12 @@ pub mod types;
 pub(crate) mod utils;
 
 use crate::{
-    ipa::utils::dot,
+    ipa::{
+        self,
+        extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
+        types as ipa_types,
+        utils::dot,
+    },
     range::{
         types::{CRS, Statement, Witness},
         utils::{VectorPolynomial, bit_decomposition, power_sequence},
@@ -20,6 +25,7 @@ use spongefish::{
 };
 use std::array;
 use std::ops::Mul;
+use tracing::instrument;
 
 pub trait RangeProofDomainSeparator<G: CurveGroup> {
     fn range_proof_statement(self) -> Self;
@@ -31,12 +37,10 @@ where
     G: CurveGroup,
     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
 {
-    /// The IO of the range proof statement
     fn range_proof_statement(self) -> Self {
         self.add_points(1, "Range proof statement")
     }
 
-    /// The IO of the range proof protocol
     fn add_range_proof(mut self, n: usize) -> Self {
         self = self
             .add_points(2, "round-message: A, S")
@@ -44,12 +48,12 @@ where
             .add_points(2, "round-message: T1, T2")
             .challenge_scalars(1, "challenge x")
             .add_scalars(3, "round-message: t_x, mu, t_hat")
-            .add_scalars(n, "round-message: l")
-            .add_scalars(n, "round-message: r");
+            .add_extended_bulletproof(n);
         self
     }
 }
 
+#[instrument(skip_all, fields(nbits = N), level = "debug")]
 pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     mut prover_state: ProverState,
     crs: &CRS<G>,
@@ -58,6 +62,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
 ) -> ProofResult<Vec<u8>> {
     assert!(crs.size() >= N, "CRS size is smaller than witness nbits");
 
+    let gs = &crs.ipa_crs.gs[0..N];
+    let hs = &crs.ipa_crs.hs[0..N];
     let one_vec = &crs.one_vec[0..N];
     let two_vec = &crs.two_vec[0..N];
 
@@ -70,16 +76,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     let a_r: [G::ScalarField; N] = a_l.map(|x| x - G::ScalarField::one());
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
-    let a = crs.h.mul(alpha)
-        + G::msm_unchecked(&crs.gs[0..N], &a_l)
-        + G::msm_unchecked(&crs.hs[0..N], &a_r);
+    let a = crs.h.mul(alpha) + G::msm_unchecked(gs, &a_l) + G::msm_unchecked(hs, &a_r);
     let s_l: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
     let s_r: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
 
     let rho: G::ScalarField = UniformRand::rand(rng);
-    let s = crs.h.mul(rho)
-        + G::msm_unchecked(&crs.gs[0..N], &s_l)
-        + G::msm_unchecked(&crs.hs[0..N], &s_r);
+    let s = crs.h.mul(rho) + G::msm_unchecked(gs, &s_l) + G::msm_unchecked(hs, &s_r);
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
     let y_vec: [G::ScalarField; N] = power_sequence(y);
@@ -97,32 +99,62 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
         VectorPolynomial { coeffs }
     };
 
-    let t_poly = l_poly.inner_product(&r_poly);
-
     let tao1: G::ScalarField = UniformRand::rand(rng);
     let tao2: G::ScalarField = UniformRand::rand(rng);
 
-    let tt1 = crs.g.mul(t_poly[1]) + crs.h.mul(tao1);
-    let tt2 = crs.g.mul(t_poly[2]) + crs.h.mul(tao2);
+    {
+        let t_poly = l_poly.inner_product(&r_poly);
+        let tt1 = crs.g.mul(t_poly[1]) + crs.h.mul(tao1);
+        let tt2 = crs.g.mul(t_poly[2]) + crs.h.mul(tao2);
 
-    prover_state.add_points(&[tt1, tt2])?;
+        prover_state.add_points(&[tt1, tt2])?;
+    }
 
-    let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+    {
+        let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
 
-    let l: [G::ScalarField; N] = l_poly.evaluate(x);
-    let r: [G::ScalarField; N] = r_poly.evaluate(x);
-    let t_hat = dot(&l, &r);
+        let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
+        let mu = alpha + rho * x;
+        let l: [G::ScalarField; N] = l_poly.evaluate(x);
+        let r: [G::ScalarField; N] = r_poly.evaluate(x);
 
-    let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
-    let mu = alpha + rho * x;
+        let witness =
+            ipa_types::Witness::new(ipa_types::Vector(l.to_vec()), ipa_types::Vector(r.to_vec()));
 
-    prover_state.add_scalars(&[tao_x, mu, t_hat])?;
-    prover_state.add_scalars(&l)?;
-    prover_state.add_scalars(&r)?;
+        let hs_prime = create_hs_prime(crs, y_vec);
+
+        let mut extended_statement: ExtendedStatement<G> =
+            ipa::extended::extended_statement(gs, &hs_prime, &witness);
+
+        extended_statement.p += crs.h.mul(-mu);
+
+        prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
+        let crs = ipa_types::CRS {
+            gs: gs.to_vec(),
+            hs: hs_prime,
+            u: crs.ipa_crs.u,
+        };
+
+        extended::prove(&mut prover_state, &crs, &extended_statement, &witness)
+    }?;
 
     Ok(prover_state.narg_string().to_vec())
 }
 
+fn create_hs_prime<G: CurveGroup, const N: usize>(
+    crs: &CRS<G>,
+    y_vec: [G::ScalarField; N],
+) -> Vec<G::Affine> {
+    let y_inv_vec = {
+        let mut ys = y_vec;
+        batch_inversion(&mut ys);
+        ys
+    };
+    let hs: [G; N] = array::from_fn(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]));
+    G::normalize_batch(&hs)
+}
+
+#[instrument(skip_all, fields(nbits = N), level = "debug")]
 pub fn verify<G: CurveGroup, const N: usize>(
     mut verifier_state: spongefish::VerifierState,
     crs: &CRS<G>,
@@ -133,33 +165,24 @@ pub fn verify<G: CurveGroup, const N: usize>(
     let [tt1, tt2]: [G; 2] = verifier_state.next_points()?;
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
-    let l: [G::ScalarField; N] = verifier_state.next_scalars()?;
-    let r: [G::ScalarField; N] = verifier_state.next_scalars()?;
 
     let one_vec = &crs.one_vec[0..N];
     let two_vec = &crs.two_vec[0..N];
     let y_vec: [G::ScalarField; N] = power_sequence(y);
 
-    let delta_y_z = {
-        let z_cubed = z * z.square();
-        (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
-    };
-    let hs: Vec<G::Affine> = {
-        let y_inv_vec = {
-            let mut ys = y_vec;
-            batch_inversion(&mut ys);
-            ys
-        };
-        let hs: [G; N] = array::from_fn(|i| crs.hs[i].mul(y_inv_vec[i]));
-        G::normalize_batch(&hs)
-    };
-
     {
         let tt1 = tt1.into_affine();
         let tt2 = tt2.into_affine();
+
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
-        let rhs =
-            statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square());
+        let rhs = {
+            let delta_y_z = {
+                let z_cubed = z * z.square();
+                (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
+            };
+
+            statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
+        };
         assert!(
             (lhs - rhs).is_zero(),
             "Failed to verify t_hat = t(x) = t_0 + t_1 x + t_2 x^2"
@@ -167,24 +190,27 @@ pub fn verify<G: CurveGroup, const N: usize>(
     };
 
     {
-        let lhs: G = {
-            let hs_scalars: [G::ScalarField; N] =
-                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i] - r[i]);
-            let gs_scalars: [G::ScalarField; N] = array::from_fn(|i| -z - l[i]);
-            a + s.mul(x)
-                + G::msm_unchecked(&crs.gs[0..N], &gs_scalars)
-                + G::msm_unchecked(&hs, &hs_scalars)
-        };
-        let rhs = crs.h.mul(mu);
-        assert!(
-            (lhs - rhs).is_zero(),
-            "Failed to verify inner product relation"
-        );
-    };
+        let gs = &crs.ipa_crs.gs[0..N];
+        let hs_prime = create_hs_prime(crs, y_vec);
 
-    {
-        assert!(t_hat == dot(&l, &r), "t_hat does not equal <l,r>");
-    }
+        let p: G = {
+            let hs_scalars: [G::ScalarField; N] =
+                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i]);
+            a + s.mul(x) + G::msm_unchecked(gs, &[-z; N]) + G::msm_unchecked(&hs_prime, &hs_scalars)
+        };
+
+        let extended_statement = ExtendedStatement {
+            p: p + crs.h.mul(-mu),
+            c: t_hat,
+        };
+
+        let crs = ipa_types::CRS {
+            gs: gs.to_vec(),
+            hs: hs_prime,
+            u: crs.ipa_crs.u,
+        };
+        extended::verify(verifier_state, &crs, &extended_statement)
+    }?;
 
     Ok(())
 }
@@ -197,14 +223,14 @@ mod tests_range {
     use rand::rngs::OsRng;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
-    const N: usize = 64;
+    const N: usize = 16;
 
     proptest! {
           #![proptest_config(Config::with_cases(2))]
           #[test]
-        fn test_range_proof(n in any::<u64>()) {
+        fn test_range_proof(n in any::<u16>()) {
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(64);
+            let crs: CRS<Projective> = CRS::rand(N);
             let witness = Witness::<N, Fr>::new(Fr::from(n), &mut rng);
 
             let domain_separator = {
@@ -225,6 +251,8 @@ mod tests_range {
             prover_state.ratchet().unwrap();
 
             let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
+
+            tracing::info!("proof size: {} bytes", proof.len());
 
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state
