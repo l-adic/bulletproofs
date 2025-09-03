@@ -2,7 +2,12 @@ pub mod types;
 pub(crate) mod utils;
 
 use crate::{
-    ipa::utils::dot,
+    ipa::{
+        self,
+        extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
+        types as ipa_types,
+        utils::dot,
+    },
     range::{
         types::{CRS, Statement, Witness},
         utils::{VectorPolynomial, bit_decomposition, power_sequence},
@@ -43,9 +48,8 @@ where
             .challenge_scalars(2, "challenge [y,z]")
             .add_points(2, "round-message: T1, T2")
             .challenge_scalars(1, "challenge x")
-            .add_scalars(3, "round-message: t_x, mu, t_hat")
-            .add_scalars(n, "round-message: l")
-            .add_scalars(n, "round-message: r");
+            .add_extended_bulletproof(n)
+            .add_scalars(3, "round-message: t_x, mu, t_hat");
         self
     }
 }
@@ -109,16 +113,33 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
 
     let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
 
-    let l: [G::ScalarField; N] = l_poly.evaluate(x);
-    let r: [G::ScalarField; N] = r_poly.evaluate(x);
-    let t_hat = dot(&l, &r);
-
     let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
     let mu = alpha + rho * x;
 
+    let t_hat = {
+        let l: [G::ScalarField; N] = l_poly.evaluate(x);
+        let r: [G::ScalarField; N] = r_poly.evaluate(x);
+
+        let witness =
+            ipa_types::Witness::new(ipa_types::Vector(l.to_vec()), ipa_types::Vector(r.to_vec()));
+
+        let hs_prime = create_hs_prime(crs, y_vec);
+        let extended_statement: ExtendedStatement<G> = {
+            let mut s = ipa::extended::extended_statement(&crs.gs[0..N], &hs_prime, &witness);
+            s.p += crs.h.mul(mu);
+            s
+        };
+        let ipa_crs = ipa_types::CRS {
+            gs: crs.gs[0..N].to_vec(),
+            hs: hs_prime,
+            u: crs.u,
+        };
+
+        extended::prove(&mut prover_state, &ipa_crs, &extended_statement, &witness)?;
+        ProofResult::Ok(witness.c())
+    }?;
+
     prover_state.add_scalars(&[tao_x, mu, t_hat])?;
-    prover_state.add_scalars(&l)?;
-    prover_state.add_scalars(&r)?;
 
     Ok(prover_state.narg_string().to_vec())
 }
@@ -157,11 +178,9 @@ pub fn verify<G: CurveGroup, const N: usize>(
         let z_cubed = z * z.square();
         (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
     };
-    let hs_prime= create_hs_prime(crs, y_vec);
+    let hs_prime = create_hs_prime(crs, y_vec);
 
     {
-        let tt1 = tt1.into_affine();
-        let tt2 = tt2.into_affine();
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
         let rhs =
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square());

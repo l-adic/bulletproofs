@@ -200,99 +200,99 @@ where
 
 pub mod extended {
 
-  use ark_ec::CurveGroup;
-  use ark_ff::Field;
-  use spongefish::{
-      DomainSeparator, ProofResult, ProverState, VerifierState,
-      codecs::arkworks_algebra::{
-          FieldDomainSeparator, GroupDomainSeparator, UnitToField,
-      },
-  };
-  use std::ops::Mul;
-  
-  use crate::ipa::{self as ipa, types::{Statement, Witness, CRS}, BulletproofDomainSeparator};
+    use ark_ec::CurveGroup;
+    use ark_ff::Field;
+    use spongefish::{
+        DomainSeparator, ProofResult, ProverState, VerifierState,
+        codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, UnitToField},
+    };
+    use std::ops::Mul;
 
-  pub struct ExtendedStatement<G: CurveGroup> {
-      pub p: G,
-      pub c: G::ScalarField,
-  }
-  
-  pub fn extended_statement<G: CurveGroup>(
-      gs: &[G::Affine],
-      hs: &[G::Affine],
-      inputs: &Witness<G::ScalarField>,
-  ) -> ExtendedStatement<G> {
-      let g = G::msm_unchecked(gs, &inputs.a.0);
-      let h = G::msm_unchecked(hs, &inputs.b.0);
-      let p = g.add(&h);
-      ExtendedStatement { p, c: inputs.c() }
-  }
+    use crate::ipa::{
+        self as ipa, BulletproofDomainSeparator,
+        types::{CRS, Statement, Witness},
+    };
 
+    pub struct ExtendedStatement<G: CurveGroup> {
+        pub p: G,
+        pub c: G::ScalarField,
+    }
 
-  pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
-      fn extended_bulletproof_statement(self) -> Self;
-      fn add_extended_bulletproof(self, len: usize) -> Self;
-  }
-  
-  impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
-  where
-      G: CurveGroup,
-      Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-  {
-      /// The IO of the bulletproof statement
-      fn extended_bulletproof_statement(self) -> Self {
-          self.bulletproof_statement().add_scalars(1, "dot-product")
-      }
-  
-      /// The IO of the bulletproof protocol
-      fn add_extended_bulletproof(self, len: usize) -> Self {
-          self.challenge_scalars(1, "x").add_bulletproof(len)
-      }
-  }
-  
-  pub fn prove<G: CurveGroup>(
-      prover_state: &mut ProverState,
-      crs: &CRS<G>,
-      aug_statement: &ExtendedStatement<G>,
-      witness: &Witness<G::ScalarField>,
-  ) -> ProofResult<Vec<u8>> {
-      let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
-      let statement = Statement {
-          p: aug_statement.p + crs.u.mul(x * aug_statement.c),
-      };
-      let crs_mod = CRS {
-          gs: crs.gs.clone(),
-          hs: crs.hs.clone(),
-          u: crs.u.clone().mul(x).into_affine(),
-      };
-      ipa::prove(prover_state, &crs_mod, &statement, witness)
-  }
-  
-  pub fn verify<G: CurveGroup>(
-      mut verifier_state: VerifierState,
-      crs: &CRS<G>,
-      aug_statement: &ExtendedStatement<G>,
-  ) -> ProofResult<()>
-  where
-      G::ScalarField: Field,
-  {
-      let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
-      let statement = Statement {
-          p: aug_statement.p + crs.u.mul(x * aug_statement.c),
-      };
-      let crs_mod = CRS {
-          gs: crs.gs.clone(),
-          hs: crs.hs.clone(),
-          u: crs.u.clone().mul(x).into_affine(),
-      };
-      ipa::verify(verifier_state, &crs_mod, &statement)
-  }
+    pub fn extended_statement<G: CurveGroup>(
+        gs: &[G::Affine],
+        hs: &[G::Affine],
+        inputs: &Witness<G::ScalarField>,
+    ) -> ExtendedStatement<G> {
+        let g = G::msm_unchecked(gs, &inputs.a.0);
+        let h = G::msm_unchecked(hs, &inputs.b.0);
+        let p = g.add(&h);
+        ExtendedStatement { p, c: inputs.c() }
+    }
+
+    pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
+        fn extended_bulletproof_statement(self) -> Self;
+        fn add_extended_bulletproof(self, len: usize) -> Self;
+    }
+
+    impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
+    where
+        G: CurveGroup,
+        Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
+    {
+        /// The IO of the bulletproof statement
+        fn extended_bulletproof_statement(self) -> Self {
+            self.bulletproof_statement().add_scalars(1, "dot-product")
+        }
+
+        /// The IO of the bulletproof protocol
+        fn add_extended_bulletproof(self, len: usize) -> Self {
+            self.challenge_scalars(1, "x").add_bulletproof(len)
+        }
+    }
+
+    pub fn prove<G: CurveGroup>(
+        prover_state: &mut ProverState,
+        crs: &CRS<G>,
+        aug_statement: &ExtendedStatement<G>,
+        witness: &Witness<G::ScalarField>,
+    ) -> ProofResult<Vec<u8>> {
+        let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let statement = Statement {
+            p: aug_statement.p + crs.u.mul(x * aug_statement.c),
+        };
+        let crs_mod = CRS {
+            gs: crs.gs.clone(),
+            hs: crs.hs.clone(),
+            u: crs.u.mul(x).into_affine(),
+        };
+        ipa::prove(prover_state, &crs_mod, &statement, witness)
+    }
+
+    pub fn verify<G: CurveGroup>(
+        mut verifier_state: VerifierState,
+        crs: &CRS<G>,
+        aug_statement: &ExtendedStatement<G>,
+    ) -> ProofResult<()>
+    where
+        G::ScalarField: Field,
+    {
+        let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        let statement = Statement {
+            p: aug_statement.p + crs.u.mul(x * aug_statement.c),
+        };
+        let crs_mod = CRS {
+            gs: crs.gs.clone(),
+            hs: crs.hs.clone(),
+            u: crs.u.mul(x).into_affine(),
+        };
+        ipa::verify(verifier_state, &crs_mod, &statement)
+    }
 }
 #[cfg(test)]
 mod tests_proof {
+    use super::*;
     use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
     use crate::ipa::types::{CrsSize, statement};
-    use super::*;
     use ark_secp256k1::{self, Projective};
     use proptest::{prelude::*, test_runner::Config};
     use spongefish::DomainSeparator;

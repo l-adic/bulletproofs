@@ -7,6 +7,7 @@ pub struct CRS<G: CurveGroup> {
     pub hs: Vec<G::Affine>,
     pub g: G::Affine,
     pub h: G::Affine,
+    pub u: G::Affine,
     pub one_vec: Vec<G::ScalarField>,
     pub two_vec: Vec<G::ScalarField>,
 }
@@ -19,6 +20,7 @@ where {
         let hs: Vec<G::Affine> = (0..n).map(|_| G::rand(&mut rng).into_affine()).collect();
         let g = G::rand(&mut rng).into_affine();
         let h = G::rand(&mut rng).into_affine();
+        let u: G::Affine = G::rand(&mut rng).into_affine();
         let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n];
         let two_vec: Vec<G::ScalarField> = (0..n)
             .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
@@ -28,6 +30,7 @@ where {
             hs,
             g,
             h,
+            u,
             one_vec,
             two_vec,
         }
