@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::ops::Mul;
 use tracing::instrument;
 
-#[instrument(skip_all, fields(size = left.len()))]
+#[instrument(skip_all, fields(size = left.len()), level = "debug")]
 pub fn fold_generators<G: CurveGroup>(
     left: &[G::Affine],
     right: &[G::Affine],
@@ -19,7 +19,6 @@ pub fn fold_generators<G: CurveGroup>(
     G::normalize_batch(&gs)
 }
 
-#[instrument(skip_all, fields(size = left.len()))]
 pub fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
     left.par_iter()
         .zip(right)
@@ -27,7 +26,6 @@ pub fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<F
         .collect::<Vec<_>>()
 }
 
-#[instrument(skip_all, fields(size = xs.len()))]
 pub fn dot<Fr: Field>(xs: &[Fr], ys: &[Fr]) -> Fr {
     xs.iter()
         .zip(ys)

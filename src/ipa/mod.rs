@@ -45,7 +45,7 @@ where
     }
 }
 
-#[instrument(skip_all, fields(witness_size = witness.a.0.len()))]
+#[instrument(skip_all, fields(witness_size = witness.a.0.len()), level = "debug")]
 pub fn prove<G: CurveGroup>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
@@ -97,7 +97,7 @@ pub fn prove<G: CurveGroup>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-#[instrument(skip_all, fields(crs_size = crs.size()))]
+#[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
 pub fn verify_naive<G: CurveGroup>(
     mut verifier_state: VerifierState,
     crs: &CRS<G>,
@@ -132,7 +132,7 @@ pub fn verify_naive<G: CurveGroup>(
     }
 }
 
-#[instrument(skip_all, fields(crs_size = crs.size()))]
+#[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
 pub fn verify<G: CurveGroup>(
     mut verifier_state: VerifierState,
     crs: &CRS<G>,

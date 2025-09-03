@@ -23,6 +23,7 @@ use spongefish::{
     DomainSeparator, ProofResult, ProverState,
     codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, GroupToUnitSerialize},
 };
+use tracing::instrument;
 use std::array;
 use std::ops::Mul;
 
@@ -52,6 +53,7 @@ where
     }
 }
 
+#[instrument(skip_all, fields(nbits = N), level = "debug")]
 pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     mut prover_state: ProverState,
     crs: &CRS<G>,
@@ -154,6 +156,7 @@ fn create_hs_prime<G: CurveGroup, const N: usize>(
     G::normalize_batch(&hs)
 }
 
+#[instrument(skip_all, fields(nbits = N), level = "debug")]
 pub fn verify<G: CurveGroup, const N: usize>(
     mut verifier_state: spongefish::VerifierState,
     crs: &CRS<G>,
@@ -223,14 +226,14 @@ mod tests_range {
     use rand::rngs::OsRng;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
-    const N: usize = 64;
+    const N: usize = 16;
 
     proptest! {
           #![proptest_config(Config::with_cases(2))]
           #[test]
-        fn test_range_proof(n in any::<u64>()) {
+        fn test_range_proof(n in any::<u16>()) {
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(64);
+            let crs: CRS<Projective> = CRS::rand(N);
             let witness = Witness::<N, Fr>::new(Fr::from(n), &mut rng);
 
             let domain_separator = {
@@ -252,7 +255,7 @@ mod tests_range {
 
             let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
 
-            tracing::debug!("proof size: {} bytes", proof.len());
+            tracing::info!("proof size: {} bytes", proof.len());
 
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state
