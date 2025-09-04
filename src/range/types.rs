@@ -48,7 +48,10 @@ pub struct Witness<Fr> {
 
 impl<Fr: PrimeField> Witness<Fr> {
     pub fn new<Rng: rand::Rng>(v: Fr, n_bits: usize, rng: &mut Rng) -> Self {
-        assert!(v.into_bigint().num_bits() as usize <= n_bits, "Value exceeds n_bits limit");
+        assert!(
+            v.into_bigint().num_bits() as usize <= n_bits,
+            "Value exceeds n_bits limit"
+        );
         Witness {
             v,
             gamma: Fr::rand(rng),

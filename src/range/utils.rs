@@ -21,11 +21,13 @@ pub fn bit_decomposition<Fr: PrimeField>(a: Fr) -> Vec<Fr> {
 
 pub struct VectorPolynomial<Fr: Field> {
     pub coeffs: Vec<Vec<Fr>>,
-    pub n: usize,
+    n: usize,
 }
 
 impl<Fr: Field> VectorPolynomial<Fr> {
     pub fn new(coeffs: Vec<Vec<Fr>>, n: usize) -> Self {
+        assert!(!coeffs.is_empty(), "Coefficient vector cannot be empty");
+        assert!(n > 0, "Coefficient vectors cannot be empty");
         for coeff in &coeffs {
             assert_eq!(coeff.len(), n, "All coefficient vectors must have length n");
         }
@@ -42,7 +44,7 @@ impl<Fr: Field> VectorPolynomial<Fr> {
         for _ in 0..=degree {
             coeffs.push((0..n).map(|_| Fr::rand(&mut rng)).collect());
         }
-        Self { coeffs, n }
+        Self::new(coeffs, n)
     }
 }
 

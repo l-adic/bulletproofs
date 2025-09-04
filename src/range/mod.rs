@@ -60,7 +60,10 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
     let n_bits = witness.n_bits;
-    assert!(crs.size() >= n_bits, "CRS size is smaller than witness nbits");
+    assert!(
+        crs.size() >= n_bits,
+        "CRS size is smaller than witness nbits"
+    );
 
     let gs = &crs.ipa_crs.gs[0..n_bits];
     let hs = &crs.ipa_crs.hs[0..n_bits];
@@ -89,14 +92,16 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let l_poly = {
         let coeffs = vec![
             (0..n_bits).map(|i| a_l[i] - one_vec[i] * z).collect(),
-            s_l.clone()
+            s_l.clone(),
         ];
         VectorPolynomial::new(coeffs, n_bits)
     };
 
     let r_poly = {
         let coeffs = vec![
-            (0..n_bits).map(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square()).collect(),
+            (0..n_bits)
+                .map(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square())
+                .collect(),
             (0..n_bits).map(|i| y_vec[i] * s_r[i]).collect(),
         ];
         VectorPolynomial::new(coeffs, n_bits)
@@ -143,16 +148,15 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup>(
-    crs: &CRS<G>,
-    y_vec: Vec<G::ScalarField>,
-) -> Vec<G::Affine> {
+fn create_hs_prime<G: CurveGroup>(crs: &CRS<G>, y_vec: Vec<G::ScalarField>) -> Vec<G::Affine> {
     let y_inv_vec = {
         let mut ys = y_vec;
         batch_inversion(&mut ys);
         ys
     };
-    let hs: Vec<G> = (0..y_inv_vec.len()).map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i])).collect();
+    let hs: Vec<G> = (0..y_inv_vec.len())
+        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
+        .collect();
     G::normalize_batch(&hs)
 }
 
@@ -197,8 +201,9 @@ pub fn verify<G: CurveGroup>(
         let hs_prime = create_hs_prime(crs, y_vec.clone());
 
         let p: G = {
-            let hs_scalars: Vec<G::ScalarField> = 
-                (0..n_bits).map(|i| (z * y_vec[i]) + z.square() * two_vec[i]).collect();
+            let hs_scalars: Vec<G::ScalarField> = (0..n_bits)
+                .map(|i| (z * y_vec[i]) + z.square() * two_vec[i])
+                .collect();
             let neg_z: Vec<G::ScalarField> = vec![-z; n_bits];
             a + s.mul(x) + G::msm_unchecked(gs, &neg_z) + G::msm_unchecked(&hs_prime, &hs_scalars)
         };
@@ -231,7 +236,7 @@ mod tests_range {
           #![proptest_config(Config::with_cases(10))]
           #[test]
         fn test_range_proof(i in any::<u8>()) {
-            let n = { 
+            let n = {
                 let options = [2, 4, 8, 16, 32, 64];
                 let idx = (i as usize) % options.len();
                 options[idx]
