@@ -118,12 +118,20 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
-    let a = crs.h.mul(alpha) + G::msm_unchecked(gs, &a_l) + G::msm_unchecked(hs, &a_r);
+    let a = crs.h.mul(alpha) + {
+        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
+        let scalars: Vec<G::ScalarField> = a_l.iter().copied().chain(a_r.iter().copied()).collect();
+        G::msm_unchecked(&bases, &scalars)
+    };
     let s_l: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
     let s_r: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
 
     let rho: G::ScalarField = UniformRand::rand(rng);
-    let s = crs.h.mul(rho) + G::msm_unchecked(gs, &s_l) + G::msm_unchecked(hs, &s_r);
+    let s = crs.h.mul(rho) + {
+        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
+        let scalars: Vec<G::ScalarField> = s_l.iter().copied().chain(s_r.iter().copied()).collect();
+        G::msm_unchecked(&bases, &scalars)
+    };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
 
@@ -291,9 +299,16 @@ pub fn verify<G: CurveGroup>(
             let mut gs_scalars = Vec::with_capacity(n_bits * m);
             gs_scalars.resize(n_bits * m, -z);
 
-            a + s.mul(x)
-                + G::msm_unchecked(gs, &gs_scalars)
-                + G::msm_unchecked(&hs_prime, &hs_combined_scalars)
+            {
+                let bases: Vec<G::Affine> =
+                    gs.iter().copied().chain(hs_prime.iter().copied()).collect();
+                let scalars: Vec<G::ScalarField> = gs_scalars
+                    .iter()
+                    .copied()
+                    .chain(hs_combined_scalars.iter().copied())
+                    .collect();
+                a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
+            }
         };
 
         let extended_statement = ExtendedStatement {

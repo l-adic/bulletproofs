@@ -80,12 +80,28 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
-    let a = crs.h.mul(alpha) + G::msm_unchecked(gs, &a_l) + G::msm_unchecked(hs, &a_r);
+    let a = crs.h.mul(alpha) + {
+        let bases: Vec<G::Affine> = gs.iter().cloned().chain(hs.iter().cloned()).collect();
+        let scalars: Vec<G::ScalarField> = a_l.iter().cloned().chain(a_r.iter().cloned()).collect();
+        G::msm_unchecked(&bases, &scalars)
+    };
     let s_l: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
     let s_r: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
 
     let rho: G::ScalarField = UniformRand::rand(rng);
-    let s = crs.h.mul(rho) + G::msm_unchecked(gs, &s_l) + G::msm_unchecked(hs, &s_r);
+    let s = crs.h.mul(rho) + {
+        let bases = gs
+            .iter()
+            .cloned()
+            .chain(hs.iter().cloned())
+            .collect::<Vec<_>>();
+        let scalars = s_l
+            .iter()
+            .cloned()
+            .chain(s_r.iter().cloned())
+            .collect::<Vec<_>>();
+        G::msm_unchecked(&bases, &scalars)
+    };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
@@ -197,7 +213,13 @@ pub fn verify<G: CurveGroup>(
                 .map(|i| (z * y_vec[i]) + z.square() * two_vec[i])
                 .collect();
             let neg_z: Vec<G::ScalarField> = vec![-z; n_bits];
-            a + s.mul(x) + G::msm_unchecked(gs, &neg_z) + G::msm_unchecked(&hs_prime, &hs_scalars)
+            a + s.mul(x) + {
+                let bases: Vec<G::Affine> =
+                    gs.iter().copied().chain(hs_prime.iter().copied()).collect();
+                let scalars: Vec<G::ScalarField> =
+                    neg_z.into_iter().chain(hs_scalars.into_iter()).collect();
+                G::msm_unchecked(&bases, &scalars)
+            }
         };
 
         let extended_statement = ExtendedStatement {

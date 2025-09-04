@@ -216,5 +216,10 @@ fn bench_aggregate_range_proofs(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_ipa_prove_verify_cycle, bench_range_proofs, bench_aggregate_range_proofs);
+criterion_group!(
+    benches,
+    bench_ipa_prove_verify_cycle,
+    bench_range_proofs,
+    bench_aggregate_range_proofs
+);
 criterion_main!(benches);

@@ -67,16 +67,36 @@ pub fn prove<G: CurveGroup>(
 
         let left = {
             let c_left = dot(a_left, b_right);
-            crs.u.mul(c_left)
-                + G::msm_unchecked(g_right, a_left)
-                + G::msm_unchecked(h_left, b_right)
+            crs.u.mul(c_left) + {
+                let bases: Vec<G::Affine> = g_right
+                    .iter()
+                    .copied()
+                    .chain(h_left.iter().copied())
+                    .collect();
+                let scalars: Vec<G::ScalarField> = a_left
+                    .iter()
+                    .copied()
+                    .chain(b_right.iter().copied())
+                    .collect();
+                G::msm_unchecked(&bases, &scalars)
+            }
         };
 
         let right = {
             let c_right = dot(a_right, b_left);
-            crs.u.mul(c_right)
-                + G::msm_unchecked(g_left, a_right)
-                + G::msm_unchecked(h_right, b_left)
+            crs.u.mul(c_right) + {
+                let bases: Vec<G::Affine> = g_left
+                    .iter()
+                    .copied()
+                    .chain(h_right.iter().copied())
+                    .collect();
+                let scalars: Vec<G::ScalarField> = a_right
+                    .iter()
+                    .copied()
+                    .chain(b_left.iter().copied())
+                    .collect();
+                G::msm_unchecked(&bases, &scalars)
+            }
         };
 
         prover_state.add_points(&[left, right])?;
@@ -178,9 +198,20 @@ where
             ss_inverse
         };
 
-        G::msm_unchecked(&crs.gs, &ss).mul(a)
-            + G::msm_unchecked(&crs.hs, &ss_inverse).mul(b)
-            + crs.u.mul(a * b)
+        crs.u.mul(a * b) + {
+            let bases: Vec<G::Affine> = crs
+                .gs
+                .iter()
+                .copied()
+                .chain(crs.hs.iter().copied())
+                .collect();
+            let scalars: Vec<G::ScalarField> = ss
+                .iter()
+                .map(|s| *s * a)
+                .chain(ss_inverse.iter().map(|s_inv| *s_inv * b))
+                .collect();
+            G::msm_unchecked(&bases, &scalars)
+        }
     };
 
     let rhs = {
@@ -223,9 +254,15 @@ pub mod extended {
         hs: &[G::Affine],
         inputs: &Witness<G::ScalarField>,
     ) -> ExtendedStatement<G> {
-        let g = G::msm_unchecked(gs, &inputs.a.0);
-        let h = G::msm_unchecked(hs, &inputs.b.0);
-        let p = g.add(&h);
+        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
+        let scalars: Vec<G::ScalarField> = inputs
+            .a
+            .0
+            .iter()
+            .copied()
+            .chain(inputs.b.0.iter().copied())
+            .collect();
+        let p = G::msm_unchecked(&bases, &scalars);
         ExtendedStatement { p, c: inputs.c() }
     }
 
