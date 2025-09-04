@@ -19,34 +19,45 @@ pub fn bit_decomposition<Fr: PrimeField>(a: Fr) -> Vec<Fr> {
     bits
 }
 
-pub struct VectorPolynomial<const N: usize, Fr: Field> {
-    pub coeffs: Vec<[Fr; N]>,
+pub struct VectorPolynomial<Fr: Field> {
+    pub coeffs: Vec<Vec<Fr>>,
+    n: usize,
 }
 
-impl<const N: usize, Fr: Field> VectorPolynomial<N, Fr> {
+impl<Fr: Field> VectorPolynomial<Fr> {
+    pub fn new(coeffs: Vec<Vec<Fr>>, n: usize) -> Self {
+        assert!(!coeffs.is_empty(), "Coefficient vector cannot be empty");
+        assert!(n > 0, "Coefficient vectors cannot be empty");
+        for coeff in &coeffs {
+            assert_eq!(coeff.len(), n, "All coefficient vectors must have length n");
+        }
+        Self { coeffs, n }
+    }
+
     #[cfg(test)]
-    pub fn rand(degree: usize) -> Self
+    pub fn rand(degree: usize, n: usize) -> Self
     where
         Fr: PrimeField,
     {
         let mut coeffs = Vec::with_capacity(degree + 1);
         let mut rng = ark_std::rand::thread_rng();
         for _ in 0..=degree {
-            coeffs.push(std::array::from_fn(|_| Fr::rand(&mut rng)));
+            coeffs.push((0..n).map(|_| Fr::rand(&mut rng)).collect());
         }
-        Self { coeffs }
+        Self::new(coeffs, n)
     }
 }
 
 // The inner product is defined for l, r \elem F^{n}[X] (of the same degreee d) as
 // <l,r> = \sum_{i=0}^{d} \sum_{j=0}^{i}} <l_i, r_j> X^{i+j}
-impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
+impl<Fr: Field> VectorPolynomial<Fr> {
     #[instrument(skip(self, rhs))]
     pub fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
         assert!(
             self.coeffs.len() == rhs.coeffs.len(),
             "Vector polynomials must have the same degree"
         );
+        assert_eq!(self.n, rhs.n, "Vector polynomials must have the same n");
         let degree = self.coeffs.len() - 1;
         let mut result_coeffs = vec![Fr::zero(); (2 * degree) + 1];
 
@@ -59,11 +70,11 @@ impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
         result_coeffs
     }
 
-    pub fn evaluate(&self, x: Fr) -> [Fr; N] {
-        let mut result = [Fr::zero(); N];
+    pub fn evaluate(&self, x: Fr) -> Vec<Fr> {
+        let mut result = vec![Fr::zero(); self.n];
         let mut power_of_x = Fr::one();
         for coeff in &self.coeffs {
-            for i in 0..N {
+            for i in 0..self.n {
                 result[i] += coeff[i] * power_of_x;
             }
             power_of_x *= x;
@@ -72,9 +83,9 @@ impl<Fr: Field, const N: usize> VectorPolynomial<N, Fr> {
     }
 }
 
-pub fn power_sequence<F: Field, const N: usize>(base: F) -> [F; N] {
-    let mut res = [F::one(); N];
-    for i in 1..N {
+pub fn power_sequence<F: Field>(base: F, n: usize) -> Vec<F> {
+    let mut res = vec![F::one(); n];
+    for i in 1..n {
         res[i] = res[i - 1] * base;
     }
     res
@@ -118,8 +129,8 @@ mod tests {
         degree in 1usize..5,
         x in prop::strategy::Just(Fr::rand(&mut ark_std::rand::thread_rng()))
       ) {
-            let poly1 = VectorPolynomial::<4, Fr>::rand(degree);
-            let poly2 = VectorPolynomial::<4, Fr>::rand(degree);
+            let poly1 = VectorPolynomial::<Fr>::rand(degree, 4);
+            let poly2 = VectorPolynomial::<Fr>::rand(degree, 4);
             let t = poly1.inner_product(&poly2);
             let eval1 = poly1.evaluate(x);
             let eval2 = poly2.evaluate(x);

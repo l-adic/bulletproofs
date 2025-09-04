@@ -73,8 +73,8 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &RangeCRS<Projective>) {
-    let mut group = c.benchmark_group(format!("range_{}", N));
+fn bench_range_prove_verify_cycle(c: &mut Criterion, crs: &RangeCRS<Projective>, n_bits: usize) {
+    let mut group = c.benchmark_group(format!("range_{}", n_bits));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
@@ -85,37 +85,37 @@ fn bench_range_prove_verify_cycle<const N: usize>(c: &mut Criterion, crs: &Range
         let domain_separator =
             RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
                 .ratchet();
-        RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, N)
+        RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n_bits)
     };
 
-    let mut proofs: HashMap<RangeStatement<N, Projective>, Vec<u8>> = HashMap::new();
+    let mut proofs: HashMap<RangeStatement<Projective>, Vec<u8>> = HashMap::new();
 
-    let max_val = (1u64 << N) - 1;
+    let max_val = (1u64 << n_bits) - 1;
     let v = Fr::from(rng.next_u64() % max_val.max(1));
-    let witness = RangeWitness::<N, Fr>::new(v, &mut rng);
-    let statement = RangeStatement::<N, Projective>::new(crs, &witness);
+    let witness = RangeWitness::<Fr>::new(v, n_bits, &mut rng);
+    let statement = RangeStatement::<Projective>::new(crs, &witness);
 
     // Benchmark prove
-    group.bench_with_input(BenchmarkId::new("prove", N), &N, |b, _| {
+    group.bench_with_input(BenchmarkId::new("prove", n_bits), &n_bits, |b, _| {
         b.iter(|| {
             let mut prover_state = domain_separator.to_prover_state();
             prover_state.public_points(&[statement.v]).unwrap();
             prover_state.ratchet().unwrap();
             let proof =
-                range_prove::<Projective, _, N>(prover_state, crs, &witness, &mut rng).unwrap();
-            proofs.insert(statement, proof.clone());
+                range_prove::<Projective, _>(prover_state, crs, &witness, &mut rng).unwrap();
+            proofs.insert(statement.clone(), proof.clone());
             black_box(proof)
         })
     });
 
     // Benchmark verify using proof from HashMap
-    group.bench_with_input(BenchmarkId::new("verify", N), &N, |b, _| {
+    group.bench_with_input(BenchmarkId::new("verify", n_bits), &n_bits, |b, _| {
         b.iter(|| {
             let proof = proofs.get(&statement).unwrap();
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v]).unwrap();
             verifier_state.ratchet().unwrap();
-            range_verify::<Projective, N>(verifier_state, crs, &statement).unwrap();
+            range_verify::<Projective>(verifier_state, crs, &statement).unwrap();
             black_box(())
         })
     });
@@ -127,10 +127,10 @@ fn bench_range_proofs(c: &mut Criterion) {
     // Create shared CRS that's large enough for all range proof sizes we want to test
     let shared_crs = RangeCRS::rand(64);
 
-    bench_range_prove_verify_cycle::<8>(c, &shared_crs);
-    bench_range_prove_verify_cycle::<16>(c, &shared_crs);
-    bench_range_prove_verify_cycle::<32>(c, &shared_crs);
-    bench_range_prove_verify_cycle::<64>(c, &shared_crs);
+    bench_range_prove_verify_cycle(c, &shared_crs, 8);
+    bench_range_prove_verify_cycle(c, &shared_crs, 16);
+    bench_range_prove_verify_cycle(c, &shared_crs, 32);
+    bench_range_prove_verify_cycle(c, &shared_crs, 64);
 }
 
 criterion_group!(benches, bench_ipa_prove_verify_cycle, bench_range_proofs);

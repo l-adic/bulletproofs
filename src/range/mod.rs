@@ -23,7 +23,6 @@ use spongefish::{
     DomainSeparator, ProofResult, ProverState,
     codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, GroupToUnitSerialize},
 };
-use std::array;
 use std::ops::Mul;
 use tracing::instrument;
 
@@ -53,50 +52,59 @@ where
     }
 }
 
-#[instrument(skip_all, fields(nbits = N), level = "debug")]
-pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
+#[instrument(skip_all, fields(nbits = witness.n_bits), level = "debug")]
+pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     mut prover_state: ProverState,
     crs: &CRS<G>,
-    witness: &Witness<N, G::ScalarField>,
+    witness: &Witness<G::ScalarField>,
     rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
-    assert!(crs.size() >= N, "CRS size is smaller than witness nbits");
+    let n_bits = witness.n_bits;
+    assert!(
+        crs.size() >= n_bits,
+        "CRS size is smaller than witness nbits"
+    );
 
-    let gs = &crs.ipa_crs.gs[0..N];
-    let hs = &crs.ipa_crs.hs[0..N];
-    let one_vec = &crs.one_vec[0..N];
-    let two_vec = &crs.two_vec[0..N];
+    let gs = &crs.ipa_crs.gs[0..n_bits];
+    let hs = &crs.ipa_crs.hs[0..n_bits];
+    let one_vec = &crs.one_vec[0..n_bits];
+    let two_vec = &crs.two_vec[0..n_bits];
 
-    let a_l: [G::ScalarField; N] = {
+    let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
-        bits.resize(N, G::ScalarField::zero());
-        bits.try_into().unwrap()
+        bits.resize(n_bits, G::ScalarField::zero());
+        bits
     };
 
-    let a_r: [G::ScalarField; N] = a_l.map(|x| x - G::ScalarField::one());
+    let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha) + G::msm_unchecked(gs, &a_l) + G::msm_unchecked(hs, &a_r);
-    let s_l: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
-    let s_r: [G::ScalarField; N] = array::from_fn(|_| UniformRand::rand(rng));
+    let s_l: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
+    let s_r: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
 
     let rho: G::ScalarField = UniformRand::rand(rng);
     let s = crs.h.mul(rho) + G::msm_unchecked(gs, &s_l) + G::msm_unchecked(hs, &s_r);
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
-    let y_vec: [G::ScalarField; N] = power_sequence(y);
+    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
 
     let l_poly = {
-        let coeffs = vec![array::from_fn(|i| a_l[i] - one_vec[i] * z), s_l];
-        VectorPolynomial { coeffs }
+        let coeffs = vec![
+            (0..n_bits).map(|i| a_l[i] - one_vec[i] * z).collect(),
+            s_l.clone(),
+        ];
+        VectorPolynomial::new(coeffs, n_bits)
     };
 
     let r_poly = {
         let coeffs = vec![
-            array::from_fn(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square()),
-            array::from_fn(|i| y_vec[i] * s_r[i]),
+            (0..n_bits)
+                .map(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square())
+                .collect(),
+            (0..n_bits).map(|i| y_vec[i] * s_r[i]).collect(),
         ];
-        VectorPolynomial { coeffs }
+        VectorPolynomial::new(coeffs, n_bits)
     };
 
     let tao1: G::ScalarField = UniformRand::rand(rng);
@@ -115,11 +123,10 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
 
         let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
         let mu = alpha + rho * x;
-        let l: [G::ScalarField; N] = l_poly.evaluate(x);
-        let r: [G::ScalarField; N] = r_poly.evaluate(x);
+        let l: Vec<G::ScalarField> = l_poly.evaluate(x);
+        let r: Vec<G::ScalarField> = r_poly.evaluate(x);
 
-        let witness =
-            ipa_types::Witness::new(ipa_types::Vector(l.to_vec()), ipa_types::Vector(r.to_vec()));
+        let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
 
         let hs_prime = create_hs_prime(crs, y_vec);
 
@@ -141,34 +148,34 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng, const N: usize>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup, const N: usize>(
-    crs: &CRS<G>,
-    y_vec: [G::ScalarField; N],
-) -> Vec<G::Affine> {
+fn create_hs_prime<G: CurveGroup>(crs: &CRS<G>, y_vec: Vec<G::ScalarField>) -> Vec<G::Affine> {
     let y_inv_vec = {
         let mut ys = y_vec;
         batch_inversion(&mut ys);
         ys
     };
-    let hs: [G; N] = array::from_fn(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]));
+    let hs: Vec<G> = (0..y_inv_vec.len())
+        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
+        .collect();
     G::normalize_batch(&hs)
 }
 
-#[instrument(skip_all, fields(nbits = N), level = "debug")]
-pub fn verify<G: CurveGroup, const N: usize>(
+#[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
+pub fn verify<G: CurveGroup>(
     mut verifier_state: spongefish::VerifierState,
     crs: &CRS<G>,
-    statement: &Statement<N, G>,
+    statement: &Statement<G>,
 ) -> ProofResult<()> {
+    let n_bits = statement.n_bits;
     let [a, s]: [G; 2] = verifier_state.next_points()?;
     let [y, z]: [G::ScalarField; 2] = verifier_state.challenge_scalars()?;
     let [tt1, tt2]: [G; 2] = verifier_state.next_points()?;
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let one_vec = &crs.one_vec[0..N];
-    let two_vec = &crs.two_vec[0..N];
-    let y_vec: [G::ScalarField; N] = power_sequence(y);
+    let one_vec = &crs.one_vec[0..n_bits];
+    let two_vec = &crs.two_vec[0..n_bits];
+    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
 
     {
         let tt1 = tt1.into_affine();
@@ -190,13 +197,15 @@ pub fn verify<G: CurveGroup, const N: usize>(
     };
 
     {
-        let gs = &crs.ipa_crs.gs[0..N];
-        let hs_prime = create_hs_prime(crs, y_vec);
+        let gs = &crs.ipa_crs.gs[0..n_bits];
+        let hs_prime = create_hs_prime(crs, y_vec.clone());
 
         let p: G = {
-            let hs_scalars: [G::ScalarField; N] =
-                array::from_fn(|i| (z * y_vec[i]) + z.square() * two_vec[i]);
-            a + s.mul(x) + G::msm_unchecked(gs, &[-z; N]) + G::msm_unchecked(&hs_prime, &hs_scalars)
+            let hs_scalars: Vec<G::ScalarField> = (0..n_bits)
+                .map(|i| (z * y_vec[i]) + z.square() * two_vec[i])
+                .collect();
+            let neg_z: Vec<G::ScalarField> = vec![-z; n_bits];
+            a + s.mul(x) + G::msm_unchecked(gs, &neg_z) + G::msm_unchecked(&hs_prime, &hs_scalars)
         };
 
         let extended_statement = ExtendedStatement {
@@ -223,15 +232,19 @@ mod tests_range {
     use rand::rngs::OsRng;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
-    const N: usize = 16;
-
     proptest! {
-          #![proptest_config(Config::with_cases(2))]
+          #![proptest_config(Config::with_cases(10))]
           #[test]
-        fn test_range_proof(n in any::<u16>()) {
+        fn test_range_proof(i in any::<u8>()) {
+            let n = {
+                let options = [2, 4, 8, 16, 32, 64];
+                let idx = (i as usize) % options.len();
+                options[idx]
+            };
+
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(N);
-            let witness = Witness::<N, Fr>::new(Fr::from(n), &mut rng);
+            let crs: CRS<Projective> = CRS::rand(n);
+            let witness = Witness::<Fr>::new(Fr::from(n as u64), n, &mut rng);
 
             let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-range-proof");
@@ -240,7 +253,7 @@ mod tests_range {
                     RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
                         .ratchet();
                 // add the IO of the bulletproof protocol (the transcript)
-                RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, N)
+                RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
             };
 
             let mut prover_state = domain_separator.to_prover_state();
