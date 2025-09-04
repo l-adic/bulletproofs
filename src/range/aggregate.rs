@@ -141,16 +141,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let r_poly = {
         let sigma_sum = {
             let mut res = vec![G::ScalarField::zero(); n_bits * m];
-            for j in 1..=m {
-                let mut summand = vec![G::ScalarField::zero(); n_bits * m];
-                let non_zero_entries = two_vec
-                    .iter()
-                    .map(|x| *x * z.pow([(1 + j) as u64]))
-                    .collect::<Vec<_>>();
-                summand.splice((j - 1) * n_bits..j * n_bits, non_zero_entries);
-                res.iter_mut()
-                    .zip(summand.iter())
-                    .for_each(|(a, b)| *a += *b);
+            let mut z_power = z; // z^1
+            for j in 0..m {
+                z_power *= z; // z^{1+j+1} = z^{2+j}
+                for i in 0..n_bits {
+                    res[j * n_bits + i] = two_vec[i] * z_power;
+                }
             }
             res
         };
@@ -178,9 +174,15 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
 
         let tao_x = {
-            let sigma_summand = (1..=m).fold(G::ScalarField::zero(), |acc, j| {
-                acc + z.pow([(1 + j) as u64]) * witness.gamma[j - 1]
-            });
+            let sigma_summand = {
+                let mut sum = G::ScalarField::zero();
+                let mut z_power = z; // z^1
+                for j in 0..m {
+                    z_power *= z; // z^{1+j+1} = z^{2+j}
+                    sum += z_power * witness.gamma[j];
+                }
+                sum
+            };
             tao1 * x + tao2 * x.square() + sigma_summand
         };
         let mu = alpha + rho * x;
@@ -235,9 +237,13 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let sigma_summand: G::ScalarField = {
                 let d = sum(&two_vec);
-                (1..=m).fold(G::ScalarField::zero(), |acc, j| {
-                    acc + z.pow([(2 + j) as u64]) * d
-                })
+                let mut sum = G::ScalarField::zero();
+                let mut z_power = z * z; // z^2
+                for _j in 0..m {
+                    z_power *= z; // z^{2+j+1} = z^{3+j} (for j=0 this gives z^3, for j=1 this gives z^4, etc.)
+                    sum += z_power * d;
+                }
+                sum
             };
 
             let delta_y_z = { (z - z.square()) * sum(&y_vec) - sigma_summand };
@@ -263,13 +269,15 @@ pub fn verify<G: CurveGroup>(
 
         let p: G = {
             let pi_sum = {
-                (1..=m).fold(G::zero(), |acc, j| {
-                    let scalars = two_vec
-                        .iter()
-                        .map(|x| *x * z.pow([(1 + j) as u64]))
-                        .collect::<Vec<_>>();
-                    acc + G::msm_unchecked(&hs_prime[(j - 1) * n_bits..(j * n_bits)], &scalars)
-                })
+                let mut sum = G::zero();
+                let mut z_power = z; // z^1
+                for j in 0..m {
+                    z_power *= z; // z^{1+j+1} = z^{2+j} (for j=0 this gives z^2, for j=1 this gives z^3, etc.)
+                    let scalars: Vec<G::ScalarField> =
+                        two_vec.iter().map(|x| *x * z_power).collect();
+                    sum += G::msm_unchecked(&hs_prime[j * n_bits..(j + 1) * n_bits], &scalars);
+                }
+                sum
             };
             let hs_scalars: Vec<G::ScalarField> = (0..n_bits * m).map(|i| (z * y_vec[i])).collect();
             a + s.mul(x)
