@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod types;
 pub(crate) mod utils;
 
@@ -10,18 +11,17 @@ use crate::{
     },
     range::{
         types::{CRS, Statement, Witness},
-        utils::{VectorPolynomial, bit_decomposition, power_sequence},
+        utils::{VectorPolynomial, bit_decomposition, create_hs_prime, power_sequence},
     },
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, UniformRand, Zero, batch_inversion};
-use spongefish::codecs::arkworks_algebra::FieldToUnitDeserialize;
-use spongefish::codecs::arkworks_algebra::FieldToUnitSerialize;
-use spongefish::codecs::arkworks_algebra::GroupToUnitDeserialize;
-use spongefish::codecs::arkworks_algebra::UnitToField;
+use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
     DomainSeparator, ProofResult, ProverState,
-    codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, GroupToUnitSerialize},
+    codecs::arkworks_algebra::{
+        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
+        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
+    },
 };
 use std::ops::Mul;
 use tracing::instrument;
@@ -67,8 +67,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let gs = &crs.ipa_crs.gs[0..n_bits];
     let hs = &crs.ipa_crs.hs[0..n_bits];
-    let one_vec = &crs.one_vec[0..n_bits];
-    let two_vec = &crs.two_vec[0..n_bits];
+
+    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
+    let two_vec: Vec<G::ScalarField> = (0..n_bits)
+        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
+        .collect();
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
@@ -148,18 +151,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup>(crs: &CRS<G>, y_vec: Vec<G::ScalarField>) -> Vec<G::Affine> {
-    let y_inv_vec = {
-        let mut ys = y_vec;
-        batch_inversion(&mut ys);
-        ys
-    };
-    let hs: Vec<G> = (0..y_inv_vec.len())
-        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
-        .collect();
-    G::normalize_batch(&hs)
-}
-
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
 pub fn verify<G: CurveGroup>(
     mut verifier_state: spongefish::VerifierState,
@@ -173,8 +164,10 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let one_vec = &crs.one_vec[0..n_bits];
-    let two_vec = &crs.two_vec[0..n_bits];
+    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
+    let two_vec: Vec<G::ScalarField> = (0..n_bits)
+        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
+        .collect();
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
 
     {
@@ -185,7 +178,7 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let delta_y_z = {
                 let z_cubed = z * z.square();
-                (z - z.square()) * dot(one_vec, &y_vec) - z_cubed * dot(one_vec, two_vec)
+                (z - z.square()) * dot(&one_vec, &y_vec) - z_cubed * dot(&one_vec, &two_vec)
             };
 
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
@@ -235,16 +228,14 @@ mod tests_range {
     proptest! {
           #![proptest_config(Config::with_cases(10))]
           #[test]
-        fn test_range_proof(i in any::<u8>()) {
-            let n = {
-                let options = [2, 4, 8, 16, 32, 64];
-                let idx = (i as usize) % options.len();
-                options[idx]
-            };
+        fn test_range_proof(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
 
             let mut rng = OsRng;
             let crs: CRS<Projective> = CRS::rand(n);
-            let witness = Witness::<Fr>::new(Fr::from(n as u64), n, &mut rng);
+            // pick a random Fr value in the range [0, 2^n) via bigint conversion
+            let max_value = (1u128 << n) - 1;
+            let v = Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value));
+            let witness = Witness::<Fr>::new(v, n, &mut rng);
 
             let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-range-proof");

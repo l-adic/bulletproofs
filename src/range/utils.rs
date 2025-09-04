@@ -1,5 +1,7 @@
-use crate::ipa::utils::dot;
-use ark_ff::{BigInteger, Field, PrimeField};
+use crate::{ipa::utils::dot, range::types::CRS};
+use ark_ec::CurveGroup;
+use ark_ff::{BigInteger, Field, PrimeField, batch_inversion};
+use std::ops::Mul;
 use tracing::instrument;
 
 // Decompose a field element into a vector of its bits (as field elements)
@@ -89,6 +91,18 @@ pub fn power_sequence<F: Field>(base: F, n: usize) -> Vec<F> {
         res[i] = res[i - 1] * base;
     }
     res
+}
+
+pub fn create_hs_prime<G: CurveGroup>(crs: &CRS<G>, y_vec: Vec<G::ScalarField>) -> Vec<G::Affine> {
+    let y_inv_vec = {
+        let mut ys = y_vec;
+        batch_inversion(&mut ys);
+        ys
+    };
+    let hs: Vec<G> = (0..y_inv_vec.len())
+        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
+        .collect();
+    G::normalize_batch(&hs)
 }
 
 #[cfg(test)]
