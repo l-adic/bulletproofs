@@ -40,30 +40,34 @@ where {
     }
 }
 
-pub struct Witness<const N: usize, Fr> {
+pub struct Witness<Fr> {
     pub v: Fr,
     pub gamma: Fr,
+    pub n_bits: usize,
 }
 
-impl<Fr: PrimeField, const N: usize> Witness<N, Fr> {
-    pub fn new<Rng: rand::Rng>(v: Fr, rng: &mut Rng) -> Self {
-        assert!(v.into_bigint().num_bits() as usize <= N);
+impl<Fr: PrimeField> Witness<Fr> {
+    pub fn new<Rng: rand::Rng>(v: Fr, n_bits: usize, rng: &mut Rng) -> Self {
+        assert!(v.into_bigint().num_bits() as usize <= n_bits, "Value exceeds n_bits limit");
         Witness {
             v,
             gamma: Fr::rand(rng),
+            n_bits,
         }
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub struct Statement<const N: usize, G> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Statement<G> {
     pub v: G,
+    pub n_bits: usize,
 }
 
-impl<G: CurveGroup, const N: usize> Statement<N, G> {
-    pub fn new(crs: &CRS<G>, witness: &Witness<N, G::ScalarField>) -> Self {
+impl<G: CurveGroup> Statement<G> {
+    pub fn new(crs: &CRS<G>, witness: &Witness<G::ScalarField>) -> Self {
         Statement {
             v: crs.g.mul(witness.v) + crs.h.mul(witness.gamma),
+            n_bits: witness.n_bits,
         }
     }
 }
