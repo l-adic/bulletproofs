@@ -67,6 +67,7 @@ impl<Fr: PrimeField> Witness<Fr> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Statement<G> {
     pub v: Vec<G>,
     n_bits: usize,
@@ -268,22 +269,31 @@ pub fn verify<G: CurveGroup>(
         let hs_prime = create_hs_prime(crs, y_vec.clone());
 
         let p: G = {
-            let pi_sum = {
-                let mut sum = G::zero();
-                let mut z_power = z; // z^1
-                for j in 0..m {
-                    z_power *= z; // z^{1+j+1} = z^{2+j} (for j=0 this gives z^2, for j=1 this gives z^3, etc.)
-                    let scalars: Vec<G::ScalarField> =
-                        two_vec.iter().map(|x| *x * z_power).collect();
-                    sum += G::msm_unchecked(&hs_prime[j * n_bits..(j + 1) * n_bits], &scalars);
+            // Optimization: Batch all hs_prime operations into a single MSM
+            // Combine pi_sum and hs_scalars computations
+            let mut hs_combined_scalars = vec![G::ScalarField::zero(); n_bits * m];
+
+            // First, set base hs_scalars: z * y_vec[i]
+            for i in 0..n_bits * m {
+                hs_combined_scalars[i] = z * y_vec[i];
+            }
+
+            // Then, add pi_sum contribution: two_vec[i] * z^{2+j} for each segment j
+            let mut z_power = z; // z^1
+            for j in 0..m {
+                z_power *= z; // z^{2+j}
+                for i in 0..n_bits {
+                    hs_combined_scalars[j * n_bits + i] += two_vec[i] * z_power;
                 }
-                sum
-            };
-            let hs_scalars: Vec<G::ScalarField> = (0..n_bits * m).map(|i| (z * y_vec[i])).collect();
+            }
+
+            // Pre-allocate gs_scalars to avoid vec! allocation
+            let mut gs_scalars = Vec::with_capacity(n_bits * m);
+            gs_scalars.resize(n_bits * m, -z);
+
             a + s.mul(x)
-                + G::msm_unchecked(gs, &vec![-z; n_bits * m])
-                + G::msm_unchecked(&hs_prime, &hs_scalars)
-                + pi_sum
+                + G::msm_unchecked(gs, &gs_scalars)
+                + G::msm_unchecked(&hs_prime, &hs_combined_scalars)
         };
 
         let extended_statement = ExtendedStatement {

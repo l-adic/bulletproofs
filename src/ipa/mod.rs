@@ -356,8 +356,6 @@ mod tests_proof {
             prover_state.ratchet().unwrap();
             let proof = extended::prove(&mut prover_state, &crs, &statement, &inputs).expect("proof should be generated");
 
-            println!("Got proof, verifying...");
-
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state.public_points(&[statement.p]).expect("cannot add statment");
             verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
