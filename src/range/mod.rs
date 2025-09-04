@@ -7,11 +7,11 @@ use crate::{
         self,
         extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
         types as ipa_types,
-        utils::{dot, sum},
+        utils::sum,
     },
     range::{
-        types::{Statement, Witness, CRS},
-        utils::{bit_decomposition, create_hs_prime, power_sequence, VectorPolynomial},
+        types::{CRS, Statement, Witness},
+        utils::{VectorPolynomial, bit_decomposition, create_hs_prime, power_sequence},
     },
 };
 use ark_ec::CurveGroup;
@@ -69,8 +69,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let hs = &crs.ipa_crs.hs[0..n_bits];
 
     // powers of 2
-    let two_vec: Vec<G::ScalarField> =
-        power_sequence(G::ScalarField::from(2u64), n_bits);
+    let two_vec: Vec<G::ScalarField> = power_sequence(G::ScalarField::from(2u64), n_bits);
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
@@ -93,7 +92,9 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let l_poly = {
         let coeffs = vec![
-            (0..n_bits).map(|i| a_l[i] - G::ScalarField::one() * z).collect(),
+            (0..n_bits)
+                .map(|i| a_l[i] - G::ScalarField::one() * z)
+                .collect(),
             s_l.clone(),
         ];
         VectorPolynomial::new(coeffs, n_bits)
@@ -102,7 +103,9 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let r_poly = {
         let coeffs = vec![
             (0..n_bits)
-                .map(|i| (y_vec[i] * (a_r[i] + G::ScalarField::one() * z)) + two_vec[i] * z.square())
+                .map(|i| {
+                    (y_vec[i] * (a_r[i] + G::ScalarField::one() * z)) + two_vec[i] * z.square()
+                })
                 .collect(),
             (0..n_bits).map(|i| y_vec[i] * s_r[i]).collect(),
         ];
@@ -163,8 +166,7 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let two_vec: Vec<G::ScalarField> =
-        power_sequence(G::ScalarField::from(2u64), n_bits);
+    let two_vec: Vec<G::ScalarField> = power_sequence(G::ScalarField::from(2u64), n_bits);
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
 
     {

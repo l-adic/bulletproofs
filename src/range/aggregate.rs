@@ -1,5 +1,5 @@
 use crate::ipa::extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement};
-use crate::ipa::utils::dot;
+use crate::ipa::utils::sum;
 use crate::ipa::{self, types as ipa_types};
 use crate::range::utils::{VectorPolynomial, bit_decomposition, create_hs_prime};
 use crate::range::{types::CRS, utils::power_sequence};
@@ -98,16 +98,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         "CRS size is smaller than witness n_bits * m"
     );
 
-    println!("making gs,hs");
     let gs = &crs.ipa_crs.gs[0..n_bits * m];
     let hs = &crs.ipa_crs.hs[0..n_bits * m];
 
-    println!("making one_vec, two_vec");
-    let two_vec: Vec<G::ScalarField> = (0..n_bits)
-        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
-        .collect();
+    let two_vec = power_sequence(G::ScalarField::from(2u64), n_bits);
 
-    println!("making a_l");
     let a_l: Vec<G::ScalarField> = {
         let mut res = Vec::with_capacity(n_bits * m);
         for val in &witness.v {
@@ -119,7 +114,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         res
     };
 
-    println!("making a_r");
     let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
@@ -134,7 +128,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits * m);
 
-    println!("making l_poly");
     let l_poly = {
         let coeffs = vec![
             (0..n_bits * m)
@@ -145,7 +138,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         VectorPolynomial::new(coeffs, n_bits * m)
     };
 
-    println!("making r_poly");
     let r_poly = {
         let sigma_sum = {
             let mut res = vec![G::ScalarField::zero(); n_bits * m];
@@ -156,7 +148,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
                     .map(|x| *x * z.pow([(1 + j) as u64]))
                     .collect::<Vec<_>>();
                 summand.splice((j - 1) * n_bits..j * n_bits, non_zero_entries);
-                println!("summand: {:?}", summand);
                 res.iter_mut()
                     .zip(summand.iter())
                     .for_each(|(a, b)| *a += *b);
@@ -175,7 +166,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let tao1: G::ScalarField = UniformRand::rand(rng);
     let tao2: G::ScalarField = UniformRand::rand(rng);
 
-    println!("making t_poly");
     {
         let t_poly = l_poly.inner_product(&r_poly);
         let tt1 = crs.g.mul(t_poly[1]) + crs.h.mul(tao1);
@@ -184,13 +174,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         prover_state.add_points(&[tt1, tt2])?;
     }
 
-    println!("making ipa proof");
     {
         let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
 
         let tao_x = {
             let sigma_summand = (1..=m).fold(G::ScalarField::zero(), |acc, j| {
-                acc + z.pow([(1 + j) as u64]) * witness.v[j - 1]
+                acc + z.pow([(1 + j) as u64]) * witness.gamma[j - 1]
             });
             tao1 * x + tao2 * x.square() + sigma_summand
         };
@@ -214,7 +203,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             u: crs.ipa_crs.u,
         };
 
-        print!("Hold on to your butts, proving...");
         ipa::extended::prove(&mut prover_state, &crs, &extended_statement, &witness)
     }?;
 
@@ -236,10 +224,7 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits * m];
-    let two_vec: Vec<G::ScalarField> = (0..n_bits)
-        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
-        .collect();
+    let two_vec = power_sequence(G::ScalarField::from(2u64), n_bits);
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits * m);
 
     {
@@ -249,13 +234,13 @@ pub fn verify<G: CurveGroup>(
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
         let rhs = {
             let sigma_summand: G::ScalarField = {
-                let d = dot(&one_vec[0..n_bits], &two_vec);
+                let d = sum(&two_vec);
                 (1..=m).fold(G::ScalarField::zero(), |acc, j| {
                     acc + z.pow([(2 + j) as u64]) * d
                 })
             };
 
-            let delta_y_z = { (z - z.square()) * dot(&one_vec, &y_vec) - sigma_summand };
+            let delta_y_z = { (z - z.square()) * sum(&y_vec) - sigma_summand };
 
             let z_vec = {
                 let mut powers = power_sequence(z, m);
@@ -288,7 +273,7 @@ pub fn verify<G: CurveGroup>(
             };
             let hs_scalars: Vec<G::ScalarField> = (0..n_bits * m).map(|i| (z * y_vec[i])).collect();
             a + s.mul(x)
-                + G::msm_unchecked(gs, &vec![-z; n_bits])
+                + G::msm_unchecked(gs, &vec![-z; n_bits * m])
                 + G::msm_unchecked(&hs_prime, &hs_scalars)
                 + pi_sum
         };
@@ -325,7 +310,6 @@ mod tests_range {
             m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64), Just(128), Just(256), Just(512)]
         ) {
 
-            println!("STARTING TEST FOR n_bits: {}, m: {}", n_bits, m);
             let mut rng = OsRng;
             let crs: CRS<Projective> = CRS::rand(n_bits * m);
 
@@ -336,6 +320,8 @@ mod tests_range {
                 .collect();
 
             let witness = Witness::<Fr>::new(v, n_bits, &mut rng);
+
+            let statement = Statement::new(&crs, &witness);
 
             let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-range-proof");
@@ -349,7 +335,6 @@ mod tests_range {
 
             let mut prover_state = domain_separator.to_prover_state();
 
-            let statement = Statement::new(&crs, &witness);
 
             prover_state.public_points(&statement.v).unwrap();
             prover_state.ratchet().unwrap();
