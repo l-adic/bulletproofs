@@ -133,5 +133,5 @@ fn bench_range_proofs(c: &mut Criterion) {
     bench_range_prove_verify_cycle(c, &shared_crs, 64);
 }
 
-criterion_group!(benches, bench_ipa_prove_verify_cycle, bench_range_proofs);
+criterion_group!(benches, bench_range_proofs);
 criterion_main!(benches);

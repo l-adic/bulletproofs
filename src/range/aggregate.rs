@@ -115,6 +115,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             bits.resize(n_bits, G::ScalarField::zero());
             res.extend(bits);
         }
+        assert!(res.len() == n_bits * m, "bad length");
         res
     };
 
@@ -155,6 +156,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
                     .map(|x| *x * z.pow([(1 + j) as u64]))
                     .collect::<Vec<_>>();
                 summand.splice((j - 1) * n_bits..j * n_bits, non_zero_entries);
+                println!("summand: {:?}", summand);
                 res.iter_mut()
                     .zip(summand.iter())
                     .for_each(|(a, b)| *a += *b);
@@ -256,12 +258,13 @@ pub fn verify<G: CurveGroup>(
             let delta_y_z = { (z - z.square()) * dot(&one_vec, &y_vec) - sigma_summand };
 
             let z_vec = {
-                let powers = power_sequence(z, m);
-                (0..m).map(|j| z.square() * powers[j]).collect::<Vec<_>>()
+                let mut powers = power_sequence(z, m);
+                powers.iter_mut().for_each(|x| *x *= z.square());
+                powers
             };
             let vs = G::normalize_batch(&statement.v);
 
-            G::msm_unchecked(&vs, &z_vec) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
+            crs.g.mul(delta_y_z) + G::msm_unchecked(&vs, &z_vec) + tt1.mul(x) + tt2.mul(x.square())
         };
         assert!(
             (lhs - rhs).is_zero(),
@@ -321,6 +324,8 @@ mod tests_range {
             n_bits in prop_oneof![Just(64)],
             m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64), Just(128), Just(256), Just(512)]
         ) {
+
+            println!("STARTING TEST FOR n_bits: {}, m: {}", n_bits, m);
             let mut rng = OsRng;
             let crs: CRS<Projective> = CRS::rand(n_bits * m);
 

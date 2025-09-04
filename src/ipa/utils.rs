@@ -31,3 +31,7 @@ pub fn dot<Fr: Field>(xs: &[Fr], ys: &[Fr]) -> Fr {
         .zip(ys)
         .fold(Fr::zero(), |acc, (x, y)| acc + (*x * *y))
 }
+
+pub fn sum<Fr: Field>(xs: &[Fr]) -> Fr {
+    xs.iter().fold(Fr::zero(), |acc, x| acc + *x)
+}

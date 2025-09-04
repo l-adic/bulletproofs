@@ -7,11 +7,11 @@ use crate::{
         self,
         extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
         types as ipa_types,
-        utils::dot,
+        utils::{dot, sum},
     },
     range::{
-        types::{CRS, Statement, Witness},
-        utils::{VectorPolynomial, bit_decomposition, create_hs_prime, power_sequence},
+        types::{Statement, Witness, CRS},
+        utils::{bit_decomposition, create_hs_prime, power_sequence, VectorPolynomial},
     },
 };
 use ark_ec::CurveGroup;
@@ -68,10 +68,9 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let gs = &crs.ipa_crs.gs[0..n_bits];
     let hs = &crs.ipa_crs.hs[0..n_bits];
 
-    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
-    let two_vec: Vec<G::ScalarField> = (0..n_bits)
-        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
-        .collect();
+    // powers of 2
+    let two_vec: Vec<G::ScalarField> =
+        power_sequence(G::ScalarField::from(2u64), n_bits);
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
@@ -94,7 +93,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let l_poly = {
         let coeffs = vec![
-            (0..n_bits).map(|i| a_l[i] - one_vec[i] * z).collect(),
+            (0..n_bits).map(|i| a_l[i] - G::ScalarField::one() * z).collect(),
             s_l.clone(),
         ];
         VectorPolynomial::new(coeffs, n_bits)
@@ -103,7 +102,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let r_poly = {
         let coeffs = vec![
             (0..n_bits)
-                .map(|i| (y_vec[i] * (a_r[i] + one_vec[i] * z)) + two_vec[i] * z.square())
+                .map(|i| (y_vec[i] * (a_r[i] + G::ScalarField::one() * z)) + two_vec[i] * z.square())
                 .collect(),
             (0..n_bits).map(|i| y_vec[i] * s_r[i]).collect(),
         ];
@@ -164,10 +163,8 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
-    let two_vec: Vec<G::ScalarField> = (0..n_bits)
-        .map(|i| G::ScalarField::from(2u64).pow([i as u64]))
-        .collect();
+    let two_vec: Vec<G::ScalarField> =
+        power_sequence(G::ScalarField::from(2u64), n_bits);
     let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
 
     {
@@ -178,7 +175,7 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let delta_y_z = {
                 let z_cubed = z * z.square();
-                (z - z.square()) * dot(&one_vec, &y_vec) - z_cubed * dot(&one_vec, &two_vec)
+                (z - z.square()) * sum(&y_vec) - z_cubed * sum(&two_vec)
             };
 
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
