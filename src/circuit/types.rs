@@ -75,6 +75,23 @@ impl<Fr: Field> Witness<Fr> {
     }
 }
 
+pub struct Statement<G: CurveGroup> {
+    pub v: Vec<G>,
+}
+
+impl<G: CurveGroup> Statement<G> {
+    pub fn new(crs: &CRS<G>, witness: &Witness<G::ScalarField>) -> Self {
+        Statement {
+            v: witness
+                .v
+                .iter()
+                .zip(witness.gamma.iter())
+                .map(|(vi, gi)| crs.g.mul(*vi) + crs.h.mul(*gi))
+                .collect::<Vec<_>>(),
+        }
+    }
+}
+
 pub struct Circuit<Fr> {
     // row vectors, i.r. w_l[i] is the i-th row
     pub w_l: Vec<Vec<Fr>>,

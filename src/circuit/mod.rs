@@ -11,7 +11,10 @@ use spongefish::{
 };
 
 use crate::{
-    circuit::utils::{hadarmard, mat_mul_l, mat_mul_r},
+    circuit::{
+        types::Statement,
+        utils::{hadarmard, mat_mul_l, mat_mul_r},
+    },
     ipa::{
         extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement},
         types as ipa_types,
@@ -203,7 +206,7 @@ pub fn verify<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &types::CRS<G>,
     circuit: &types::Circuit<G::ScalarField>,
-    vv: Vec<G::Affine>,
+    statement: Statement<G>,
 ) -> ProofResult<()> {
     let n = crs.size();
     let q = circuit.size();
@@ -248,7 +251,7 @@ pub fn verify<G: CurveGroup>(
                     .iter()
                     .map(|zi| x.square() * zi)
                     .collect::<Vec<_>>();
-                G::msm_unchecked(&vv, &scalars)
+                G::msm_unchecked(&G::normalize_batch(&statement.v), &scalars)
             }
             + {
                 tts.iter()
@@ -305,6 +308,8 @@ pub fn verify<G: CurveGroup>(
 
 #[cfg(test)]
 mod tests {
+    use crate::circuit::types::Statement;
+
     use super::*;
     use ark_secp256k1::{Fr, Projective};
     use proptest::{prelude::*, test_runner::Config};
@@ -328,11 +333,6 @@ mod tests {
             // CRS size must match circuit dimension
             let crs: types::CRS<Projective> = types::CRS::rand(circuit.dim());
 
-            // Create commitments to v
-            let vv: Vec<Projective> = witness.v.iter().zip(witness.gamma.iter())
-                .map(|(v_i, gamma_i)| crs.g.mul(*v_i) + crs.h.mul(*gamma_i))
-                .collect();
-
             let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-circuit-proof");
                 let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(domain_separator, witness.v.len())
@@ -342,8 +342,10 @@ mod tests {
 
             println!("Starting proof generation...");
 
+            let statement: Statement<Projective> = Statement::new(&types::CRS::rand(n), &witness);
+
             let mut prover_state = domain_separator.to_prover_state();
-            prover_state.public_points(&vv).unwrap();
+            prover_state.public_points(&statement.v).unwrap();
             prover_state.ratchet().unwrap();
 
             let proof = prove(&mut prover_state, &crs, &circuit, &witness, &mut rng).unwrap();
@@ -352,61 +354,12 @@ mod tests {
 
             println!("Starting proof verification...");
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
-            verifier_state.public_points(&vv).expect("cannot add statement");
+            verifier_state.public_points(&statement.v).expect("cannot add statement");
             verifier_state.ratchet().expect("failed to ratchet");
 
 
-            let vv_affine = Projective::normalize_batch(&vv);
-            verify(&mut verifier_state, &crs, &circuit, vv_affine).expect("proof should verify");
+            verify(&mut verifier_state, &crs, &circuit, statement).expect("proof should verify");
             println!("Proof verified successfully!");
         }
-    }
-
-    #[test]
-    fn test_z_vec_definition() {
-        use ark_secp256k1::Fr;
-
-        let z = Fr::from(3u64); // Use 3 as our base
-        let q = 4;
-
-        // Current implementation
-        let z_vec: Vec<Fr> = power_sequence(z, q + 1).into_iter().skip(1).collect();
-
-        println!("q = {}", q);
-        println!("z = {}", z);
-        println!("power_sequence(z, q + 1) = {:?}", power_sequence(z, q + 1));
-        println!("z_vec (current) = {:?}", z_vec);
-        println!("z_vec length = {}", z_vec.len());
-
-        // Expected: [z¹, z², z³, z⁴] = [3, 9, 27, 81]
-        let expected = vec![
-            Fr::from(3u64),  // z¹
-            Fr::from(9u64),  // z²
-            Fr::from(27u64), // z³
-            Fr::from(81u64), // z⁴
-        ];
-
-        println!("expected = {:?}", expected);
-        assert_eq!(z_vec, expected, "z_vec should be [z, z², z³, z⁴]");
-    }
-
-    #[test]
-    fn test_hs_prime_construction() {
-        use ark_secp256k1::{Fr, Projective};
-
-        let y = Fr::from(2u64);
-        let n = 4;
-        let crs: types::CRS<Projective> = types::CRS::rand(n);
-        let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
-
-        println!("y = {}", y);
-        println!("y_inv_vec = {:?}", y_inv_vec);
-
-        let hs_prime = create_hs_prime(&crs, &y_inv_vec);
-        println!("hs_prime length = {}", hs_prime.len());
-
-        // The function should create h'_i = h_i * y^{-i} according to paper
-        // But our current implementation uses y_inv_vec[i] which is already y^{-i}
-        // So we're computing h_i * y^{-i}, which is correct
     }
 }
