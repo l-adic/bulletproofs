@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"]
 time = { version = "0.3", features = ["formatting"] }
 ctor = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
+nalgebra = "0.33"
 
 [[bench]]
 name = "bulletproof_bench"

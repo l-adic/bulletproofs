@@ -3,15 +3,21 @@ use std::ops::Mul;
 use ark_ec::CurveGroup;
 use ark_ff::{Field, UniformRand, Zero};
 use spongefish::{
+    DomainSeparator, ProofResult, ProverState, VerifierState,
     codecs::arkworks_algebra::{
-        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator, GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField
-    }, DomainSeparator, ProofResult, ProverState, VerifierState
+        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
+        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
+    },
 };
 
 use crate::{
     circuit::utils::{mat_mul_l, mat_mul_r},
-    ipa::{extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement}, types as ipa_types, utils::dot},
-    range::utils::{power_sequence, VectorPolynomial},
+    ipa::{
+        extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement},
+        types as ipa_types,
+        utils::dot,
+    },
+    range::utils::{VectorPolynomial, power_sequence},
 };
 
 pub mod types;
@@ -55,6 +61,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         n == circuit.dim(),
         "CRS size and circuit dimension must match"
     );
+    let q = circuit.size();
     let [alpha, beta, rho]: [G::ScalarField; 3] =
         std::array::from_fn(|_| G::ScalarField::rand(rng));
 
@@ -80,7 +87,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let y_vec = power_sequence(y, n);
     let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
-    let z_vec: Vec<G::ScalarField> = power_sequence(z, n).into_iter().map(|x| z * x).collect();
+    let z_vec: Vec<G::ScalarField> = power_sequence(z, q + 1).into_iter().skip(1).collect();
 
     let l_poly: VectorPolynomial<G::ScalarField> = {
         let v = mat_mul_l(&z_vec, &circuit.w_r);
@@ -98,7 +105,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let v1 = mat_mul_l(&z_vec, &circuit.w_l);
         let v2 = mat_mul_l(&z_vec, &circuit.w_o);
         let coeffs = vec![
-            (0..n).map(|i| v2[i] - y_inv_vec[i]).collect(),
+            (0..n).map(|i| v2[i] - y_vec[i]).collect(),
             (0..n)
                 .map(|i| (y_vec[i] * witness.a_r[i]) + v1[i])
                 .collect(),
@@ -120,14 +127,18 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     });
 
     {
-        let tts = taus
+        let tts: [G; 5] = taus
             .iter()
             .enumerate()
             .filter_map(|(i, tau_i_opt)| {
                 tau_i_opt.map(|tau_i| crs.g.mul(t_poly[i]) + crs.h.mul(tau_i))
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+
         prover_state.add_points(&tts)?;
+        println!("Added tts to prover state");
     };
 
     {
@@ -137,7 +148,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             let init = x.pow([2]) * dot(&z_vec, &mat_mul_r(&circuit.w_v, &witness.gamma));
             taus.iter().enumerate().fold(init, |acc, (i, tau_i_opt)| {
                 acc + tau_i_opt
-                    .map(|tau_i| tau_i * x.pow(&[(i as u64) + 1]))
+                    .map(|tau_i| tau_i * x.pow([i as u64 + 1]))
                     .unwrap_or(G::ScalarField::zero())
             })
         };
@@ -148,7 +159,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let r = r_poly.evaluate(x);
 
         let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
-        let hs_prime = create_hs_prime(&crs, y);
+        let hs_prime = create_hs_prime(crs, &y_inv_vec);
 
         let mut extended_statement: ExtendedStatement<G> =
             crate::ipa::extended::extended_statement(&crs.ipa_crs.gs, &hs_prime, &witness);
@@ -169,10 +180,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup>(crs: &types::CRS<G>, y: G::ScalarField) -> Vec<G::Affine> {
-    let y_inv_vec = power_sequence(y.inverse().expect("non-zero y"), crs.size());
+fn create_hs_prime<G: CurveGroup>(
+    crs: &types::CRS<G>,
+    y_inv_vec: &[G::ScalarField],
+) -> Vec<G::Affine> {
     let hs = (0..y_inv_vec.len())
-        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i] * y))
+        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
         .collect::<Vec<_>>();
     G::normalize_batch(&hs)
 }
@@ -184,6 +197,7 @@ pub fn verify<G: CurveGroup>(
     vv: Vec<G::Affine>,
 ) -> ProofResult<()> {
     let n = crs.size();
+    let q = circuit.size();
 
     let [a_i, a_o, s]: [G; 3] = verifier_state.next_points()?;
     let [y, z]: [G::ScalarField; 2] = verifier_state.challenge_scalars()?;
@@ -202,7 +216,7 @@ pub fn verify<G: CurveGroup>(
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
     let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
-    let z_vec: Vec<G::ScalarField> = power_sequence(z, n).into_iter().map(|x| z * x).collect();
+    let z_vec: Vec<G::ScalarField> = power_sequence(z, q + 1).into_iter().skip(1).collect();
 
     let delta_y_z = {
         let v = mat_mul_l(&z_vec, &circuit.w_r);
@@ -227,16 +241,17 @@ pub fn verify<G: CurveGroup>(
             + {
                 tts.iter()
                     .enumerate()
-                    .filter_map(|(i, tau_i_opt)| {
-                        tau_i_opt.map(|tau_i| tau_i.mul(x.pow(&[(i as u64) + 1])))
+                    .filter_map(|(i, tt_i_opt)| {
+                        tt_i_opt.map(|tt_i| tt_i.mul(x.pow([i as u64 + 1])))
                     })
                     .fold(G::zero(), |acc, val| acc + val)
             };
-            assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
+        println!("lhs: {:?}", lhs.into_affine());
+        println!("rhs: {:?}", rhs.into_affine());
+        assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
     };
     {
-
-        let hs_prime: Vec<G::Affine> = create_hs_prime(crs, y);
+        let hs_prime: Vec<G::Affine> = create_hs_prime(crs, &y_inv_vec);
 
         let ww_l = G::msm_unchecked(&hs_prime, &mat_mul_l(&z_vec, &circuit.w_l));
         let ww_r = {
@@ -254,8 +269,6 @@ pub fn verify<G: CurveGroup>(
             + ww_o
             + s.mul(x.pow([3]));
 
-
-
         let extended_statement = ExtendedStatement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
@@ -267,8 +280,66 @@ pub fn verify<G: CurveGroup>(
             u: crs.ipa_crs.u,
         };
         crate::ipa::extended::verify(verifier_state, &crs, &extended_statement)
-
-        }?;
+    }?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_secp256k1::{Fr, Projective};
+    use proptest::{prelude::*, test_runner::Config};
+    use rand::rngs::OsRng;
+    use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
+
+    proptest! {
+        #![proptest_config(Config::with_cases(1))]
+        #[test]
+        fn test_circuit_proof(
+           (n,q) in (2usize..5, 4usize..5)
+        ) {
+            let mut rng = OsRng;
+
+            // Generate valid circuit and witness using the working method
+            let (circuit, witness) = types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
+
+            // Verify circuit is satisfied by witness before proving
+            assert!(circuit.is_satisfied_by(&witness), "Circuit not satisfied by witness");
+
+            // CRS size must match circuit dimension
+            let crs: types::CRS<Projective> = types::CRS::rand(circuit.dim());
+
+            // Create commitments to v
+            let vv: Vec<Projective> = witness.v.iter().zip(witness.gamma.iter())
+                .map(|(v_i, gamma_i)| crs.g.mul(*v_i) + crs.h.mul(*gamma_i))
+                .collect();
+
+            let domain_separator = {
+                let domain_separator = DomainSeparator::new("test-circuit-proof");
+                let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(domain_separator, witness.v.len())
+                    .ratchet();
+                CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n)
+            };
+
+            println!("Starting proof generation...");
+
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&vv).unwrap();
+            prover_state.ratchet().unwrap();
+
+            let proof = prove(&mut prover_state, &crs, &circuit, &witness, &mut rng).unwrap();
+
+            println!("Proof generated, size: {} bytes", proof.len());
+
+            println!("Starting proof verification...");
+            let mut verifier_state = domain_separator.to_verifier_state(&proof);
+            verifier_state.public_points(&vv).expect("cannot add statement");
+            verifier_state.ratchet().expect("failed to ratchet");
+
+
+            let vv_affine = Projective::normalize_batch(&vv);
+            verify(&mut verifier_state, &crs, &circuit, vv_affine).expect("proof should verify");
+        }
+    }
 }

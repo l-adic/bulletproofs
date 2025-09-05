@@ -123,6 +123,33 @@ impl<Fr> Circuit<Fr> {
         self.w_l[0].len()
     }
 
+    pub fn is_satisfied_by(&self, witness: &Witness<Fr>) -> bool
+    where
+        Fr: Field,
+    {
+        use crate::circuit::utils::hadarmard;
+        use crate::ipa::utils::dot;
+
+        // Check arithmetic constraint: a_l ⊙ a_r = a_o
+        let expected_a_o = hadarmard(&witness.a_l, &witness.a_r);
+        if witness.a_o != expected_a_o {
+            return false;
+        }
+
+        // Check circuit constraints: W_l * a_l + W_r * a_r + W_o * a_o = W_v * v + c
+        for i in 0..self.size() {
+            let lhs = dot(&self.w_l[i], &witness.a_l)
+                + dot(&self.w_r[i], &witness.a_r)
+                + dot(&self.w_o[i], &witness.a_o);
+            let rhs = dot(&self.w_v[i], &witness.v) + self.c[i];
+            if lhs != rhs {
+                return false;
+            }
+        }
+
+        true
+    }
+
     pub fn rand<Rng: rand::Rng>(q: usize, n: usize, rng: &mut Rng) -> Self
     where
         Fr: UniformRand,
@@ -141,5 +168,88 @@ impl<Fr> Circuit<Fr> {
             .collect();
         let c = (0..q).map(|_| Fr::rand(rng)).collect();
         Self::new(w_l, w_r, w_o, w_v, c)
+    }
+
+    #[cfg(test)]
+    pub fn generate_from_witness<Rng: rand::Rng>(
+        q: usize,
+        n: usize,
+        rng: &mut Rng,
+    ) -> (Self, Witness<Fr>)
+    where
+        Fr: Field + UniformRand,
+    {
+        use crate::circuit::utils::hadarmard;
+        use crate::ipa::utils::dot;
+
+        // Step 1: Generate witness with arithmetic constraint a_l * a_r = a_o
+        let a_l: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
+        let a_r: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
+        let a_o = hadarmard(&a_l, &a_r); // a_l ⊙ a_r = a_o
+
+        // Step 2: Generate random v (auxiliary witness)
+        let v: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
+
+        // Step 3: Generate random constraint matrices W_l, W_r, W_o, W_v
+        let w_l: Vec<Vec<Fr>> = (0..q)
+            .map(|_| (0..n).map(|_| Fr::rand(rng)).collect())
+            .collect();
+        let w_r: Vec<Vec<Fr>> = (0..q)
+            .map(|_| (0..n).map(|_| Fr::rand(rng)).collect())
+            .collect();
+        let w_o: Vec<Vec<Fr>> = (0..q)
+            .map(|_| (0..n).map(|_| Fr::rand(rng)).collect())
+            .collect();
+        let w_v: Vec<Vec<Fr>> = (0..q)
+            .map(|_| (0..n).map(|_| Fr::rand(rng)).collect())
+            .collect();
+
+        // Step 4: Compute c to satisfy constraints: W_l * a_l + W_r * a_r + W_o * a_o = W_v * v + c
+        let c: Vec<Fr> = (0..q)
+            .map(|i| {
+                let lhs = dot(&w_l[i], &a_l) + dot(&w_r[i], &a_r) + dot(&w_o[i], &a_o);
+                let rhs_wv = dot(&w_v[i], &v);
+                lhs - rhs_wv // c[i] = lhs - W_v[i] * v
+            })
+            .collect();
+
+        let circuit = Self::new(w_l, w_r, w_o, w_v, c);
+        let witness = Witness::new(a_l, a_r, a_o, v, rng);
+
+        (circuit, witness)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit::utils::hadarmard;
+    use crate::ipa::utils::dot;
+    use ark_secp256k1::Fr;
+    use rand::rngs::OsRng;
+
+    #[test]
+    fn test_generate_from_witness_satisfies_constraints() {
+        let mut rng = OsRng;
+        let q = 4;
+        let n = 6;
+
+        let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
+
+        // Verify arithmetic constraint: a_l ⊙ a_r = a_o
+        let expected_a_o = hadarmard(&witness.a_l, &witness.a_r);
+        assert_eq!(
+            witness.a_o, expected_a_o,
+            "Arithmetic constraint a_l ⊙ a_r = a_o not satisfied"
+        );
+
+        // Verify circuit constraint: W_l * a_l + W_r * a_r + W_o * a_o = W_v * v + c
+        for i in 0..q {
+            let lhs = dot(&circuit.w_l[i], &witness.a_l)
+                + dot(&circuit.w_r[i], &witness.a_r)
+                + dot(&circuit.w_o[i], &witness.a_o);
+            let rhs = dot(&circuit.w_v[i], &witness.v) + circuit.c[i];
+            assert_eq!(lhs, rhs, "Circuit constraint {} not satisfied", i);
+        }
     }
 }
