@@ -69,7 +69,7 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
                 verifier_state.public_points(&[stmt.p]).unwrap();
                 verifier_state.ratchet().unwrap();
 
-                ipa_verify(verifier_state, &crs, &stmt).unwrap();
+                ipa_verify(&mut verifier_state, &crs, &stmt).unwrap();
                 black_box(())
             })
         });
@@ -120,7 +120,7 @@ fn bench_range_prove_verify_cycle(c: &mut Criterion, crs: &RangeCRS<Projective>,
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v]).unwrap();
             verifier_state.ratchet().unwrap();
-            range_verify::<Projective>(verifier_state, crs, &statement).unwrap();
+            range_verify::<Projective>(&mut verifier_state, crs, &statement).unwrap();
             black_box(())
         })
     });
@@ -186,7 +186,7 @@ fn bench_aggregate_range_prove_verify_cycle(
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&statement.v).unwrap();
             verifier_state.ratchet().unwrap();
-            aggregate_verify::<Projective>(verifier_state, crs, &statement).unwrap();
+            aggregate_verify::<Projective>(&mut verifier_state, crs, &statement).unwrap();
             black_box(())
         })
     });

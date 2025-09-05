@@ -1,3 +1,4 @@
+pub mod circuit;
 pub mod ipa;
 pub mod range;
 
