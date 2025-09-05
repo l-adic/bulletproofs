@@ -8,7 +8,12 @@ use bulletproofs::{
         verify as ipa_verify,
     },
     range::{
-        RangeProofDomainSeparator, prove as range_prove,
+        RangeProofDomainSeparator,
+        aggregate::{
+            AggregatedRangeProofDomainSeparator, Statement as AggregateStatement,
+            Witness as AggregateWitness, prove as aggregate_prove, verify as aggregate_verify,
+        },
+        prove as range_prove,
         types::{CRS as RangeCRS, Statement as RangeStatement, Witness as RangeWitness},
         verify as range_verify,
     },
@@ -123,6 +128,72 @@ fn bench_range_prove_verify_cycle(c: &mut Criterion, crs: &RangeCRS<Projective>,
     group.finish();
 }
 
+fn bench_aggregate_range_prove_verify_cycle(
+    c: &mut Criterion,
+    crs: &RangeCRS<Projective>,
+    n_bits: usize,
+    m: usize,
+) {
+    let mut group = c.benchmark_group(format!("aggregate_range_{}_{}", n_bits, m));
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(60));
+
+    let mut rng = OsRng;
+
+    let domain_separator = {
+        let domain_separator = DomainSeparator::new("aggregate-range-benchmark");
+        let domain_separator =
+            AggregatedRangeProofDomainSeparator::<Projective>::aggregated_range_proof_statement(
+                domain_separator,
+                m,
+            )
+            .ratchet();
+        AggregatedRangeProofDomainSeparator::<Projective>::add_aggregated_range_proof(
+            domain_separator,
+            n_bits,
+            m,
+        )
+    };
+
+    let mut proofs: HashMap<AggregateStatement<Projective>, Vec<u8>> = HashMap::new();
+
+    // Generate m random values in range [0, 2^n_bits)
+    let max_val = (1u128 << n_bits.min(127)) - 1;
+    let v: Vec<Fr> = (0..m)
+        .map(|_| Fr::from(rng.next_u64() as u128 % (max_val + 1)))
+        .collect();
+
+    let witness = AggregateWitness::<Fr>::new(v, n_bits, &mut rng);
+    let statement = AggregateStatement::<Projective>::new(crs, &witness);
+
+    // Benchmark prove
+    group.bench_with_input(BenchmarkId::new("prove", m), &m, |b, _| {
+        b.iter(|| {
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&statement.v).unwrap();
+            prover_state.ratchet().unwrap();
+            let proof =
+                aggregate_prove::<Projective, _>(prover_state, crs, &witness, &mut rng).unwrap();
+            proofs.insert(statement.clone(), proof.clone());
+            black_box(proof)
+        })
+    });
+
+    // Benchmark verify using proof from HashMap
+    group.bench_with_input(BenchmarkId::new("verify", m), &m, |b, _| {
+        b.iter(|| {
+            let proof = proofs.get(&statement).unwrap();
+            let mut verifier_state = domain_separator.to_verifier_state(proof);
+            verifier_state.public_points(&statement.v).unwrap();
+            verifier_state.ratchet().unwrap();
+            aggregate_verify::<Projective>(verifier_state, crs, &statement).unwrap();
+            black_box(())
+        })
+    });
+
+    group.finish();
+}
+
 fn bench_range_proofs(c: &mut Criterion) {
     // Create shared CRS that's large enough for all range proof sizes we want to test
     let shared_crs = RangeCRS::rand(64);
@@ -133,5 +204,22 @@ fn bench_range_proofs(c: &mut Criterion) {
     bench_range_prove_verify_cycle(c, &shared_crs, 64);
 }
 
-criterion_group!(benches, bench_ipa_prove_verify_cycle, bench_range_proofs);
+fn bench_aggregate_range_proofs(c: &mut Criterion) {
+    // Create shared CRS large enough for n_bits=64 and m=512 (64 * 512 = 32768)
+    let shared_crs = RangeCRS::rand(64 * 512);
+    let n_bits = 64;
+
+    // Test powers of 2 from 2^1 to 2^9 (2 to 512)
+    for i in 1..=9 {
+        let m = 1 << i; // 2^i
+        bench_aggregate_range_prove_verify_cycle(c, &shared_crs, n_bits, m);
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_ipa_prove_verify_cycle,
+    bench_range_proofs,
+    bench_aggregate_range_proofs
+);
 criterion_main!(benches);
