@@ -5,9 +5,9 @@ pub fn mat_mul_l<Fr: Field>(x: &[Fr], m: &[Vec<Fr>]) -> Vec<Fr> {
     assert_eq!(x.len(), m.len(), "Matrix multiplication dimension mismatch");
     let n = m[0].len();
     let mut res = vec![Fr::zero(); n];
-    for j in 0..n {
-        for i in 0..x.len() {
-            res[j] += x[i] * m[i][j];
+    for (j, res_j) in res.iter_mut().enumerate() {
+        for (i, x_i) in x.iter().enumerate() {
+            *res_j += *x_i * m[i][j];
         }
     }
     res
@@ -21,9 +21,9 @@ pub fn mat_mul_r<Fr: Field>(m: &[Vec<Fr>], x: &[Fr]) -> Vec<Fr> {
     );
     let n = m.len();
     let mut res = vec![Fr::zero(); n];
-    for i in 0..n {
-        for j in 0..x.len() {
-            res[i] += m[i][j] * x[j];
+    for (i, res_i) in res.iter_mut().enumerate() {
+        for (j, x_j) in x.iter().enumerate() {
+            *res_i += m[i][j] * *x_j;
         }
     }
     res

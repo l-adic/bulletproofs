@@ -56,20 +56,18 @@ impl<Fr: Field> VectorPolynomial<Fr> {
     #[instrument(skip(self, rhs))]
     pub fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
         assert_eq!(self.n, rhs.n, "Vector polynomials must have the same n");
-        let degree = match self.coeffs.len().cmp(&rhs.coeffs.len()) {
-            std::cmp::Ordering::Less => rhs.coeffs.len() - 1,
-            _ => self.coeffs.len() - 1,
-        };
+        assert_eq!(
+            self.coeffs.len(),
+            rhs.coeffs.len(),
+            "Vector polynomials must have the same degree"
+        );
+        let degree = self.coeffs.len() - 1;
         let mut result_coeffs = vec![Fr::zero(); (2 * degree) + 1];
 
         for i in 0..=degree {
             for j in 0..=degree {
-                if self.coeffs.len() <= i || rhs.coeffs.len() <= j {
-                    result_coeffs[i + j] = Fr::zero()
-                } else {
-                    let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
-                    result_coeffs[i + j] += dot_product;
-                }
+                let dot_product = dot(&self.coeffs[i], &rhs.coeffs[j]);
+                result_coeffs[i + j] += dot_product;
             }
         }
         result_coeffs

@@ -11,7 +11,7 @@ use spongefish::{
 };
 
 use crate::{
-    circuit::utils::{mat_mul_l, mat_mul_r},
+    circuit::utils::{hadarmard, mat_mul_l, mat_mul_r},
     ipa::{
         extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement},
         types as ipa_types,
@@ -131,14 +131,13 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             .iter()
             .enumerate()
             .filter_map(|(i, tau_i_opt)| {
-                tau_i_opt.map(|tau_i| crs.g.mul(t_poly[i]) + crs.h.mul(tau_i))
+                tau_i_opt.map(|tau_i| crs.g.mul(t_poly[i + 1]) + crs.h.mul(tau_i))
             })
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
 
         prover_state.add_points(&tts)?;
-        println!("Added tts to prover state");
     };
 
     {
@@ -164,7 +163,17 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let mut extended_statement: ExtendedStatement<G> =
             crate::ipa::extended::extended_statement(&crs.ipa_crs.gs, &hs_prime, &witness);
 
+        println!(
+            "Prover  extended_statement.p (before -mu) = {:?}",
+            extended_statement.p.into_affine()
+        );
         extended_statement.p += crs.h.mul(-mu);
+        println!(
+            "Prover  extended_statement.p (after -mu) = {:?}",
+            extended_statement.p.into_affine()
+        );
+
+        println!("Prover  extended_statement.c = {:?}", extended_statement.c);
 
         prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
 
@@ -215,6 +224,7 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
+    let y_vec = power_sequence(y, n);
     let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
     let z_vec: Vec<G::ScalarField> = power_sequence(z, q + 1).into_iter().skip(1).collect();
 
@@ -224,6 +234,8 @@ pub fn verify<G: CurveGroup>(
         let r = mat_mul_l(&z_vec, &circuit.w_l);
         dot(&l, &r)
     };
+
+    println!("Verifier delta_y_z = {}", delta_y_z);
 
     {
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
@@ -246,8 +258,6 @@ pub fn verify<G: CurveGroup>(
                     })
                     .fold(G::zero(), |acc, val| acc + val)
             };
-        println!("lhs: {:?}", lhs.into_affine());
-        println!("rhs: {:?}", rhs.into_affine());
         assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
     };
     {
@@ -256,23 +266,31 @@ pub fn verify<G: CurveGroup>(
         let ww_l = G::msm_unchecked(&hs_prime, &mat_mul_l(&z_vec, &circuit.w_l));
         let ww_r = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
-            let scalars = (0..n).map(|i| y_inv_vec[i] * v[i]).collect::<Vec<_>>();
+            let scalars = hadarmard(&y_inv_vec, &v);
             G::msm_unchecked(&crs.ipa_crs.gs, &scalars)
         };
-        let ww_o = G::msm_unchecked(&crs.ipa_crs.gs, &mat_mul_l(&z_vec, &circuit.w_o));
+        let ww_o = G::msm_unchecked(&hs_prime, &mat_mul_l(&z_vec, &circuit.w_o));
+
+        let neg_y_vec = y_vec.iter().map(|yi| -*yi).collect::<Vec<_>>();
 
         let p: G = a_i.mul(x)
             + a_o.mul(x.square())
-            + G::msm_unchecked(&hs_prime, &y_inv_vec)
+            + G::msm_unchecked(&hs_prime, &neg_y_vec)
             + ww_l.mul(x)
             + ww_r.mul(x)
             + ww_o
             + s.mul(x.pow([3]));
 
+        println!("  verifier p (before -mu) = {:?}", p.into_affine());
+        let p_with_mu = p + crs.h.mul(-mu);
+        println!("  verifier p (after -mu) = {:?}", p_with_mu.into_affine());
+
         let extended_statement = ExtendedStatement {
-            p: p + crs.h.mul(-mu),
+            p: p_with_mu,
             c: t_hat,
         };
+
+        println!("Verifier extended_statement.c = {:?}", extended_statement.c);
 
         let crs = ipa_types::CRS {
             gs: crs.ipa_crs.gs.to_vec(),
@@ -294,10 +312,10 @@ mod tests {
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
-        #![proptest_config(Config::with_cases(1))]
+        #![proptest_config(Config::with_cases(5))]
         #[test]
         fn test_circuit_proof(
-           (n,q) in (2usize..5, 4usize..5)
+           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)], 4usize..100)
         ) {
             let mut rng = OsRng;
 
@@ -340,6 +358,55 @@ mod tests {
 
             let vv_affine = Projective::normalize_batch(&vv);
             verify(&mut verifier_state, &crs, &circuit, vv_affine).expect("proof should verify");
+            println!("Proof verified successfully!");
         }
+    }
+
+    #[test]
+    fn test_z_vec_definition() {
+        use ark_secp256k1::Fr;
+
+        let z = Fr::from(3u64); // Use 3 as our base
+        let q = 4;
+
+        // Current implementation
+        let z_vec: Vec<Fr> = power_sequence(z, q + 1).into_iter().skip(1).collect();
+
+        println!("q = {}", q);
+        println!("z = {}", z);
+        println!("power_sequence(z, q + 1) = {:?}", power_sequence(z, q + 1));
+        println!("z_vec (current) = {:?}", z_vec);
+        println!("z_vec length = {}", z_vec.len());
+
+        // Expected: [z¹, z², z³, z⁴] = [3, 9, 27, 81]
+        let expected = vec![
+            Fr::from(3u64),  // z¹
+            Fr::from(9u64),  // z²
+            Fr::from(27u64), // z³
+            Fr::from(81u64), // z⁴
+        ];
+
+        println!("expected = {:?}", expected);
+        assert_eq!(z_vec, expected, "z_vec should be [z, z², z³, z⁴]");
+    }
+
+    #[test]
+    fn test_hs_prime_construction() {
+        use ark_secp256k1::{Fr, Projective};
+
+        let y = Fr::from(2u64);
+        let n = 4;
+        let crs: types::CRS<Projective> = types::CRS::rand(n);
+        let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
+
+        println!("y = {}", y);
+        println!("y_inv_vec = {:?}", y_inv_vec);
+
+        let hs_prime = create_hs_prime(&crs, &y_inv_vec);
+        println!("hs_prime length = {}", hs_prime.len());
+
+        // The function should create h'_i = h_i * y^{-i} according to paper
+        // But our current implementation uses y_inv_vec[i] which is already y^{-i}
+        // So we're computing h_i * y^{-i}, which is correct
     }
 }
