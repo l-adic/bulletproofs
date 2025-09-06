@@ -159,7 +159,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
 
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+        let hs_prime = create_hs_prime(crs, y_vec);
 
         let mut extended_statement: ExtendedStatement<G> =
             ipa::extended::extended_statement(gs, &hs_prime, &witness);
@@ -217,7 +217,7 @@ pub fn verify<G: CurveGroup>(
 
     {
         let gs = &crs.ipa_crs.gs[0..n_bits];
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+        let hs_prime = create_hs_prime(crs, y_vec.clone());
 
         let p: G = {
             let hs_scalars: Vec<G::ScalarField> = y_vec

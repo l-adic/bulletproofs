@@ -116,11 +116,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         res
     };
 
-    let a_r: Vec<G::ScalarField> = a_l
-        .iter()
-        .copied()
-        .vector_sub(one_vec.iter().copied())
-        .collect();
+    let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha) + {
@@ -217,7 +213,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
 
-        let hs_prime = create_hs_prime::<G>(hs, y);
+        let hs_prime = create_hs_prime(crs, y_vec);
 
         let mut extended_statement: ExtendedStatement<G> =
             ipa::extended::extended_statement(gs, &hs_prime, &witness);
@@ -291,21 +287,39 @@ pub fn verify<G: CurveGroup>(
 
     {
         let gs = &crs.ipa_crs.gs[0..n_bits * m];
-        let hs = &crs.ipa_crs.hs[0..n_bits * m];
-        let hs_prime = create_hs_prime::<G>(hs, y);
+        let hs_prime = create_hs_prime(crs, y_vec.clone());
 
         let p: G = {
-            let hs_scalars = y_vec
-                .iter()
-                .copied()
-                .scale(z)
-                .vector_add(two_vec.iter().copied().scale(z.square()));
-            let gs_scalars = std::iter::repeat(z).take(n_bits * m);
+            // Optimization: Batch all hs_prime operations into a single MSM
+            // Combine pi_sum and hs_scalars computations
+            let mut hs_combined_scalars = vec![G::ScalarField::zero(); n_bits * m];
+
+            // First, set base hs_scalars: z * y_vec[i]
+            for i in 0..n_bits * m {
+                hs_combined_scalars[i] = z * y_vec[i];
+            }
+
+            // Then, add pi_sum contribution: two_vec[i] * z^{2+j} for each segment j
+            let mut z_power = z; // z^1
+            for j in 0..m {
+                z_power *= z; // z^{2+j}
+                for i in 0..n_bits {
+                    hs_combined_scalars[j * n_bits + i] += two_vec[i] * z_power;
+                }
+            }
+
+            // Pre-allocate gs_scalars to avoid vec! allocation
+            let mut gs_scalars = Vec::with_capacity(n_bits * m);
+            gs_scalars.resize(n_bits * m, -z);
 
             {
                 let bases: Vec<G::Affine> =
                     gs.iter().copied().chain(hs_prime.iter().copied()).collect();
-                let scalars: Vec<G::ScalarField> = gs_scalars.chain(hs_scalars).collect();
+                let scalars: Vec<G::ScalarField> = gs_scalars
+                    .iter()
+                    .copied()
+                    .chain(hs_combined_scalars.iter().copied())
+                    .collect();
                 a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
             }
         };
