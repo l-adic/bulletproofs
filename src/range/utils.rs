@@ -1,6 +1,6 @@
-use crate::{range::types::CRS, vector_ops::inner_product};
+use crate::vector_ops::inner_product;
 use ark_ec::CurveGroup;
-use ark_ff::{BigInteger, Field, PrimeField, batch_inversion};
+use ark_ff::{BigInteger, Field, One, PrimeField};
 use std::ops::Mul;
 use tracing::instrument;
 
@@ -96,16 +96,15 @@ pub fn power_sequence<F: Field>(base: F, n: usize) -> Vec<F> {
     res
 }
 
-pub fn create_hs_prime<G: CurveGroup>(crs: &CRS<G>, y_vec: Vec<G::ScalarField>) -> Vec<G::Affine> {
-    let y_inv_vec = {
-        let mut ys = y_vec;
-        batch_inversion(&mut ys);
-        ys
-    };
-    let hs: Vec<G> = (0..y_inv_vec.len())
-        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
-        .collect();
-    G::normalize_batch(&hs)
+pub fn create_hs_prime<G: CurveGroup>(hs: &[G::Affine], y: G::ScalarField) -> Vec<G::Affine> {
+    let y_inv = y.inverse().expect("non-zero y");
+    let ys_inv = std::iter::successors(Some(G::ScalarField::one()), |&x| (Some(x * y_inv)));
+    G::normalize_batch(
+        &hs.iter()
+            .zip(ys_inv)
+            .map(|(h, y_inv)| h.mul(y_inv))
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]
@@ -151,7 +150,7 @@ mod tests {
             let t = poly1.inner_product(&poly2);
             let eval1 = poly1.evaluate(x);
             let eval2 = poly2.evaluate(x);
-            let inner_prod_eval = inner_product(eval1.into_iter(), eval2.iter().copied());
+            let inner_prod_eval = inner_product(eval1.into_iter(), eval2.into_iter());
             let powers_of_x = (0..=degree*2).map(|i| x.pow([i as u64])).collect::<Vec<_>>();
             let eval_t_at_x = t.iter().zip(powers_of_x.iter()).fold(Fr::zero(), |acc, (coeff, power)| acc + (*coeff * *power));
             prop_assert_eq!(inner_prod_eval, eval_t_at_x);

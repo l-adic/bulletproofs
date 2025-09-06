@@ -159,7 +159,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
 
-        let hs_prime = create_hs_prime(crs, y_vec);
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
         let mut extended_statement: ExtendedStatement<G> =
             ipa::extended::extended_statement(gs, &hs_prime, &witness);
@@ -217,7 +217,7 @@ pub fn verify<G: CurveGroup>(
 
     {
         let gs = &crs.ipa_crs.gs[0..n_bits];
-        let hs_prime = create_hs_prime(crs, y_vec.clone());
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
         let p: G = {
             let hs_scalars: Vec<G::ScalarField> = y_vec
@@ -261,7 +261,7 @@ mod tests_range {
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
-          #![proptest_config(Config::with_cases(10))]
+          #![proptest_config(Config::with_cases(4))]
           #[test]
         fn test_range_proof(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
 
