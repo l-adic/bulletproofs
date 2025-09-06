@@ -25,13 +25,3 @@ pub fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<F
         .map(|(l, r)| *l * x + *r * y)
         .collect::<Vec<_>>()
 }
-
-pub fn dot<Fr: Field>(xs: &[Fr], ys: &[Fr]) -> Fr {
-    xs.iter()
-        .zip(ys)
-        .fold(Fr::zero(), |acc, (x, y)| acc + (*x * *y))
-}
-
-pub fn sum<Fr: Field>(xs: &[Fr]) -> Fr {
-    xs.iter().fold(Fr::zero(), |acc, x| acc + *x)
-}

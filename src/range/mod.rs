@@ -7,12 +7,12 @@ use crate::{
         self,
         extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
         types as ipa_types,
-        utils::sum,
     },
     range::{
         types::{CRS, Statement, Witness},
         utils::{VectorPolynomial, bit_decomposition, create_hs_prime, power_sequence},
     },
+    vector_ops::{VectorOps, sum},
 };
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, UniformRand, Zero};
@@ -68,6 +68,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let gs = &crs.ipa_crs.gs[0..n_bits];
     let hs = &crs.ipa_crs.hs[0..n_bits];
 
+    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
     // powers of 2
     let two_vec: Vec<G::ScalarField> = power_sequence(G::ScalarField::from(2u64), n_bits);
 
@@ -85,8 +86,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let scalars: Vec<G::ScalarField> = a_l.iter().cloned().chain(a_r.iter().cloned()).collect();
         G::msm_unchecked(&bases, &scalars)
     };
-    let s_l: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
-    let s_r: Vec<G::ScalarField> = (0..n_bits).map(|_| UniformRand::rand(rng)).collect();
+    let s_l = (0..n_bits)
+        .map(|_| UniformRand::rand(rng))
+        .collect::<Vec<_>>();
+    let s_r = (0..n_bits)
+        .map(|_| UniformRand::rand(rng))
+        .collect::<Vec<_>>();
 
     let rho: G::ScalarField = UniformRand::rand(rng);
     let s = crs.h.mul(rho) + {
@@ -97,8 +102,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             .collect::<Vec<_>>();
         let scalars = s_l
             .iter()
-            .cloned()
-            .chain(s_r.iter().cloned())
+            .copied()
+            .chain(s_r.iter().copied())
             .collect::<Vec<_>>();
         G::msm_unchecked(&bases, &scalars)
     };
@@ -108,22 +113,27 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let l_poly = {
         let coeffs = vec![
-            (0..n_bits)
-                .map(|i| a_l[i] - G::ScalarField::one() * z)
+            a_l.into_iter()
+                .vector_sub(one_vec.iter().copied().scale(z))
                 .collect(),
-            s_l.clone(),
+            s_l,
         ];
         VectorPolynomial::new(coeffs, n_bits)
     };
 
     let r_poly = {
         let coeffs = vec![
-            (0..n_bits)
-                .map(|i| {
-                    (y_vec[i] * (a_r[i] + G::ScalarField::one() * z)) + two_vec[i] * z.square()
-                })
+            y_vec
+                .iter()
+                .copied()
+                .hadamard(
+                    a_r.iter()
+                        .copied()
+                        .vector_add(one_vec.iter().copied().scale(z)),
+                )
+                .vector_add(two_vec.iter().copied().scale(z.square()))
                 .collect(),
-            (0..n_bits).map(|i| y_vec[i] * s_r[i]).collect(),
+            y_vec.iter().copied().hadamard(s_r).collect(),
         ];
         VectorPolynomial::new(coeffs, n_bits)
     };
@@ -149,7 +159,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
 
-        let hs_prime = create_hs_prime(crs, y_vec);
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
         let mut extended_statement: ExtendedStatement<G> =
             ipa::extended::extended_statement(gs, &hs_prime, &witness);
@@ -193,7 +203,8 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let delta_y_z = {
                 let z_cubed = z * z.square();
-                (z - z.square()) * sum(&y_vec) - z_cubed * sum(&two_vec)
+                (z - z.square()) * sum(y_vec.iter().copied())
+                    - z_cubed * sum(two_vec.iter().copied())
             };
 
             statement.v.mul(z.square()) + crs.g.mul(delta_y_z) + tt1.mul(x) + tt2.mul(x.square())
@@ -206,11 +217,14 @@ pub fn verify<G: CurveGroup>(
 
     {
         let gs = &crs.ipa_crs.gs[0..n_bits];
-        let hs_prime = create_hs_prime(crs, y_vec.clone());
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
         let p: G = {
-            let hs_scalars: Vec<G::ScalarField> = (0..n_bits)
-                .map(|i| (z * y_vec[i]) + z.square() * two_vec[i])
+            let hs_scalars: Vec<G::ScalarField> = y_vec
+                .iter()
+                .copied()
+                .scale(z)
+                .vector_add(two_vec.iter().copied().scale(z.square()))
                 .collect();
             let neg_z: Vec<G::ScalarField> = vec![-z; n_bits];
             a + s.mul(x) + {

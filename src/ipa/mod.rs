@@ -14,9 +14,12 @@ use spongefish::{
 use std::ops::Mul;
 use tracing::instrument;
 
-use crate::ipa::{
-    types::{CRS, Statement, Vector, Witness},
-    utils::{dot, fold_generators, fold_scalars},
+use crate::{
+    ipa::{
+        types::{CRS, Statement, Vector, Witness},
+        utils::{fold_generators, fold_scalars},
+    },
+    vector_ops::inner_product,
 };
 
 pub trait BulletproofDomainSeparator<G: CurveGroup> {
@@ -66,7 +69,8 @@ pub fn prove<G: CurveGroup>(
         let (b_left, b_right) = witness.b.0.split_at(n);
 
         let left = {
-            let c_left = dot(a_left, b_right);
+            //let c_left = //slice_ops::dot(a_left, b_right);
+            let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied()); //inner_product(a_left, b_right);
             crs.u.mul(c_left) + {
                 let bases: Vec<G::Affine> = g_right
                     .iter()
@@ -83,7 +87,7 @@ pub fn prove<G: CurveGroup>(
         };
 
         let right = {
-            let c_right = dot(a_right, b_left);
+            let c_right = inner_product(a_right.iter().copied(), b_left.iter().copied());
             crs.u.mul(c_right) + {
                 let bases: Vec<G::Affine> = g_left
                     .iter()
