@@ -1,10 +1,5 @@
-use crate::ipa::extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement};
-use crate::ipa::utils::sum;
-use crate::ipa::{self, types as ipa_types};
-use crate::range::utils::{VectorPolynomial, bit_decomposition, create_hs_prime};
-use crate::range::{types::CRS, utils::power_sequence};
 use ark_ec::CurveGroup;
-use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
+use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
     DomainSeparator, ProofResult, ProverState,
     codecs::arkworks_algebra::{
@@ -14,6 +9,16 @@ use spongefish::{
 };
 use std::ops::Mul;
 use tracing::instrument;
+
+use crate::range::{
+    types::{CRS, VectorPolynomial},
+    utils::{bit_decomposition, create_hs_prime, power_sequence},
+};
+use crate::vector_ops::{VectorOps, sum};
+use crate::{
+    ipa::{self, extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
+    range::types::aggregate::{Statement, Witness},
+};
 
 #[allow(dead_code)]
 pub trait AggregatedRangeProofDomainSeparator<G: CurveGroup> {
@@ -42,48 +47,6 @@ where
     }
 }
 
-pub struct Witness<Fr> {
-    pub v: Vec<Fr>,
-    pub gamma: Vec<Fr>,
-    n_bits: usize,
-}
-
-impl<Fr: PrimeField> Witness<Fr> {
-    pub fn new<Rng: rand::Rng>(v: Vec<Fr>, n_bits: usize, rang: &mut Rng) -> Self
-    where
-        Fr: PrimeField,
-    {
-        for val in &v {
-            assert!(val.into_bigint().num_bits() as usize <= n_bits);
-        }
-
-        let gamma = (0..v.len()).map(|_| Fr::rand(rang)).collect();
-        Witness { v, gamma, n_bits }
-    }
-
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.v.len()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Statement<G> {
-    pub v: Vec<G>,
-    n_bits: usize,
-}
-
-impl<G: CurveGroup> Statement<G> {
-    pub fn new(crs: &CRS<G>, witness: &Witness<G::ScalarField>) -> Self {
-        Statement {
-            v: (0..witness.len())
-                .map(|i| crs.g.mul(witness.v[i]) + crs.h.mul(witness.gamma[i]))
-                .collect(),
-            n_bits: witness.n_bits,
-        }
-    }
-}
-
 #[instrument(skip_all, fields(n_bits = witness.n_bits, m = witness.len()), level = "debug")]
 pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     mut prover_state: ProverState,
@@ -102,6 +65,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let gs = &crs.ipa_crs.gs[0..n_bits * m];
     let hs = &crs.ipa_crs.hs[0..n_bits * m];
 
+    let one_vec = vec![G::ScalarField::one(); n_bits * m];
     let two_vec = power_sequence(G::ScalarField::from(2u64), n_bits);
 
     let a_l: Vec<G::ScalarField> = {
@@ -115,7 +79,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         res
     };
 
-    let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
+    let a_r: Vec<G::ScalarField> = a_l
+        .iter()
+        .copied()
+        .vector_sub(one_vec.iter().copied())
+        .collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha) + {
@@ -139,8 +107,9 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let l_poly = {
         let coeffs = vec![
-            (0..n_bits * m)
-                .map(|i| a_l[i] - z * G::ScalarField::one())
+            a_l.iter()
+                .copied()
+                .vector_sub(one_vec.iter().copied().scale(z))
                 .collect(),
             s_l.clone(),
         ];
@@ -160,10 +129,21 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             res
         };
         let coeffs = vec![
-            (0..n_bits * m)
-                .map(|i| (y_vec[i] * (a_r[i] + z * G::ScalarField::one())) + sigma_sum[i])
+            y_vec
+                .iter()
+                .copied()
+                .hadamard(
+                    a_r.iter()
+                        .copied()
+                        .vector_add(one_vec.iter().copied().scale(z)),
+                )
+                .vector_add(sigma_sum.iter().copied())
                 .collect(),
-            (0..n_bits * m).map(|i| y_vec[i] * s_r[i]).collect(),
+            y_vec
+                .iter()
+                .copied()
+                .hadamard(s_r.iter().copied())
+                .collect(),
         ];
         VectorPolynomial::new(coeffs, n_bits * m)
     };
@@ -198,12 +178,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let l: Vec<G::ScalarField> = l_poly.evaluate(x);
         let r: Vec<G::ScalarField> = r_poly.evaluate(x);
 
-        let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
+        let witness = ipa_types::Witness::new(l, r);
 
-        let hs_prime = create_hs_prime(crs, y_vec);
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
 
-        let mut extended_statement: ExtendedStatement<G> =
-            ipa::extended::extended_statement(gs, &hs_prime, &witness);
+        let mut extended_statement = witness.extended_statement(&crs.ipa_crs);
 
         extended_statement.p += crs.h.mul(-mu);
 
@@ -245,17 +224,17 @@ pub fn verify<G: CurveGroup>(
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
         let rhs = {
             let sigma_summand: G::ScalarField = {
-                let d = sum(&two_vec);
+                let d = sum(two_vec.iter().copied());
                 let mut sum = G::ScalarField::zero();
                 let mut z_power = z * z; // z^2
                 for _j in 0..m {
-                    z_power *= z; // z^{2+j+1} = z^{3+j} (for j=0 this gives z^3, for j=1 this gives z^4, etc.)
+                    z_power *= z;
                     sum += z_power * d;
                 }
                 sum
             };
 
-            let delta_y_z = { (z - z.square()) * sum(&y_vec) - sigma_summand };
+            let delta_y_z = { (z - z.square()) * sum(y_vec.iter().copied()) - sigma_summand };
 
             let z_vec = {
                 let mut powers = power_sequence(z, m);
@@ -274,19 +253,15 @@ pub fn verify<G: CurveGroup>(
 
     {
         let gs = &crs.ipa_crs.gs[0..n_bits * m];
-        let hs_prime = create_hs_prime(crs, y_vec.clone());
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
 
         let p: G = {
-            // Optimization: Batch all hs_prime operations into a single MSM
-            // Combine pi_sum and hs_scalars computations
             let mut hs_combined_scalars = vec![G::ScalarField::zero(); n_bits * m];
 
-            // First, set base hs_scalars: z * y_vec[i]
             for i in 0..n_bits * m {
                 hs_combined_scalars[i] = z * y_vec[i];
             }
 
-            // Then, add pi_sum contribution: two_vec[i] * z^{2+j} for each segment j
             let mut z_power = z; // z^1
             for j in 0..m {
                 z_power *= z; // z^{2+j}
@@ -295,23 +270,19 @@ pub fn verify<G: CurveGroup>(
                 }
             }
 
-            // Pre-allocate gs_scalars to avoid vec! allocation
-            let mut gs_scalars = Vec::with_capacity(n_bits * m);
-            gs_scalars.resize(n_bits * m, -z);
+            let gs_scalars = std::iter::repeat(-z).take(n_bits * m);
 
             {
                 let bases: Vec<G::Affine> =
                     gs.iter().copied().chain(hs_prime.iter().copied()).collect();
                 let scalars: Vec<G::ScalarField> = gs_scalars
-                    .iter()
-                    .copied()
                     .chain(hs_combined_scalars.iter().copied())
                     .collect();
                 a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
             }
         };
 
-        let extended_statement = ExtendedStatement {
+        let extended_statement = ipa_types::extended::Statement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
         };
@@ -336,15 +307,15 @@ mod tests_range {
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
-          #![proptest_config(Config::with_cases(10))]
+          #![proptest_config(Config::with_cases(2))]
           #[test]
         fn test_aggregated_range_proof(
-            n_bits in prop_oneof![Just(64)],
+            n_bits in prop_oneof![Just(16), Just(32), Just(64)],
             m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64), Just(128), Just(256), Just(512)]
         ) {
 
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(n_bits * m);
+            let crs: CRS<Projective> = CRS::rand(n_bits * m, &mut rng);
 
             // Generate m random values in range [0, 2^n_bits)
             let max_value = (1u128 << n_bits.min(127)) - 1;

@@ -1,5 +1,6 @@
 pub mod ipa;
 pub mod range;
+mod vector_ops;
 
 #[cfg(test)]
 mod test {

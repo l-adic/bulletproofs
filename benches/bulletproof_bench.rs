@@ -4,17 +4,20 @@ use ark_secp256k1::{Fr, Projective};
 use bulletproofs::{
     ipa::{
         BulletproofDomainSeparator, prove as ipa_prove,
-        types::{CRS as IpaCRS, CrsSize, Witness as IpaWitness, statement},
+        types::{CRS as IpaCRS, CrsSize, Witness as IpaWitness},
         verify as ipa_verify,
     },
     range::{
         RangeProofDomainSeparator,
         aggregate::{
-            AggregatedRangeProofDomainSeparator, Statement as AggregateStatement,
-            Witness as AggregateWitness, prove as aggregate_prove, verify as aggregate_verify,
+            AggregatedRangeProofDomainSeparator, prove as aggregate_prove,
+            verify as aggregate_verify,
         },
         prove as range_prove,
-        types::{CRS as RangeCRS, Statement as RangeStatement, Witness as RangeWitness},
+        types::{
+            self as range_types, CRS as RangeCRS, Statement as RangeStatement,
+            Witness as RangeWitness,
+        },
         verify as range_verify,
     },
 };
@@ -24,6 +27,7 @@ use spongefish::DomainSeparator;
 use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
 fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
+    let mut rng = OsRng;
     let mut group = c.benchmark_group("ipa");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(80));
@@ -35,7 +39,7 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
 
     for size in sizes {
         let crs_size = CrsSize { log2_size: size };
-        let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size);
+        let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size, &mut rng);
 
         // Create shared domain separator
         let domain_separator = DomainSeparator::new("ipa-benchmark");
@@ -45,8 +49,8 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
         let domain_separator =
             BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size());
 
-        let witness = IpaWitness::rand(crs.size() as u64);
-        let stmt = statement(&crs, &witness);
+        let witness = IpaWitness::rand(crs.size() as u64, &mut rng);
+        let stmt = witness.statement(&crs);
 
         // Benchmark prove
         group.bench_with_input(BenchmarkId::new("prove", size), &size, |b, _| {
@@ -155,7 +159,8 @@ fn bench_aggregate_range_prove_verify_cycle(
         )
     };
 
-    let mut proofs: HashMap<AggregateStatement<Projective>, Vec<u8>> = HashMap::new();
+    let mut proofs: HashMap<range_types::aggregate::Statement<Projective>, Vec<u8>> =
+        HashMap::new();
 
     // Generate m random values in range [0, 2^n_bits)
     let max_val = (1u128 << n_bits.min(127)) - 1;
@@ -163,8 +168,8 @@ fn bench_aggregate_range_prove_verify_cycle(
         .map(|_| Fr::from(rng.next_u64() as u128 % (max_val + 1)))
         .collect();
 
-    let witness = AggregateWitness::<Fr>::new(v, n_bits, &mut rng);
-    let statement = AggregateStatement::<Projective>::new(crs, &witness);
+    let witness = range_types::aggregate::Witness::<Fr>::new(v, n_bits, &mut rng);
+    let statement = range_types::aggregate::Statement::<Projective>::new(crs, &witness);
 
     // Benchmark prove
     group.bench_with_input(BenchmarkId::new("prove", m), &m, |b, _| {
@@ -195,8 +200,9 @@ fn bench_aggregate_range_prove_verify_cycle(
 }
 
 fn bench_range_proofs(c: &mut Criterion) {
+    let mut rng = OsRng;
     // Create shared CRS that's large enough for all range proof sizes we want to test
-    let shared_crs = RangeCRS::rand(64);
+    let shared_crs = RangeCRS::rand(64, &mut rng);
 
     bench_range_prove_verify_cycle(c, &shared_crs, 8);
     bench_range_prove_verify_cycle(c, &shared_crs, 16);
@@ -206,7 +212,7 @@ fn bench_range_proofs(c: &mut Criterion) {
 
 fn bench_aggregate_range_proofs(c: &mut Criterion) {
     // Create shared CRS large enough for n_bits=64 and m=512 (64 * 512 = 32768)
-    let shared_crs = RangeCRS::rand(64 * 512);
+    let shared_crs = RangeCRS::rand(64 * 512, &mut OsRng);
     let n_bits = 64;
 
     // Test powers of 2 from 2^1 to 2^9 (2 to 512)
