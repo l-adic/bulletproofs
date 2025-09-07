@@ -1,7 +1,7 @@
-use std::ops::Mul;
+use std::{iter::successors, ops::Mul};
 
 use ark_ec::CurveGroup;
-use ark_ff::{Field, UniformRand, Zero};
+use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
     DomainSeparator, ProofResult, ProverState, VerifierState,
     codecs::arkworks_algebra::{
@@ -13,11 +13,11 @@ use spongefish::{
 use crate::{
     circuit::{
         types::Statement,
-        utils::{hadarmard, mat_mul_l, mat_mul_r},
+        utils::{hadarmard, mat_mul_r},
     },
     ipa::{extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
-    range::{types::VectorPolynomial, utils::power_sequence},
-    vector_ops::inner_product,
+    range::types::VectorPolynomial,
+    vector_ops::{VectorOps, inner_product, mat_mul_l},
 };
 
 pub mod types;
@@ -65,9 +65,22 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let [alpha, beta, rho]: [G::ScalarField; 3] =
         std::array::from_fn(|_| G::ScalarField::rand(rng));
 
-    let a_i = crs.h.mul(alpha)
-        + G::msm_unchecked(&crs.ipa_crs.gs, &witness.a_l)
-        + G::msm_unchecked(&crs.ipa_crs.hs, &witness.a_r);
+    let a_i = crs.h.mul(alpha) + {
+        let bases: Vec<G::Affine> = crs
+            .ipa_crs
+            .gs
+            .iter()
+            .chain(crs.ipa_crs.hs.iter())
+            .copied()
+            .collect();
+        let scalars: Vec<G::ScalarField> = witness
+            .a_l
+            .iter()
+            .chain(witness.a_r.iter())
+            .copied()
+            .collect();
+        G::msm_unchecked(&bases, &scalars)
+    };
 
     let a_o = crs.h.mul(beta) + G::msm_unchecked(&crs.ipa_crs.gs, &witness.a_o);
 
@@ -78,24 +91,49 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         .map(|_| G::ScalarField::rand(rng))
         .collect::<Vec<_>>();
 
-    let s = crs.h.mul(rho)
-        + G::msm_unchecked(&crs.ipa_crs.gs, &s_l)
-        + G::msm_unchecked(&crs.ipa_crs.hs, &s_r);
+    let s = crs.h.mul(rho) + {
+        let bases: Vec<G::Affine> = crs
+            .ipa_crs
+            .gs
+            .iter()
+            .chain(crs.ipa_crs.hs.iter())
+            .copied()
+            .collect();
+        let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
+        G::msm_unchecked(&bases, &scalars)
+    };
 
     prover_state.add_points(&[a_i, a_o, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
 
-    let y_vec = power_sequence(y, n);
-    let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
-    let z_vec: Vec<G::ScalarField> = power_sequence(z, q + 1).into_iter().skip(1).collect();
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n)
+            .collect();
+
+    let y_inv_vec: Vec<G::ScalarField> = {
+        let y_inv = y.inverse().expect("nonzero y");
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y_inv))
+            .take(n)
+            .collect()
+    };
+    let z_vec: Vec<G::ScalarField> = successors(Some(z), |succ| Some(*succ * z))
+        .take(q)
+        .collect();
 
     let l_poly: VectorPolynomial<G::ScalarField> = {
         let v = mat_mul_l(&z_vec, &circuit.w_r);
         let coeffs = vec![
             vec![G::ScalarField::zero(); n],
-            (0..n)
-                .map(|i| witness.a_l[i] + (y_inv_vec[i] * v[i]))
+            witness
+                .a_l
+                .iter()
+                .copied()
+                .vector_add(y_inv_vec.iter().copied().hadamard(v))
                 .collect(),
+            //(0..n)
+            //    .map(|i| witness.a_l[i] + (y_inv_vec[i] * v[i]))
+            //    .collect(),
             witness.a_o.clone(),
             s_l,
         ];
@@ -105,12 +143,20 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let v1 = mat_mul_l(&z_vec, &circuit.w_l);
         let v2 = mat_mul_l(&z_vec, &circuit.w_o);
         let coeffs = vec![
-            (0..n).map(|i| v2[i] - y_vec[i]).collect(),
-            (0..n)
-                .map(|i| (y_vec[i] * witness.a_r[i]) + v1[i])
+            v2.vector_sub(y_vec.iter().copied()).collect(),
+            // (0..n).map(|i| v2[i] - y_vec[i]).collect(),
+            y_vec
+                .iter()
+                .copied()
+                .hadamard(witness.a_r.iter().copied())
+                .vector_add(v1)
                 .collect(),
             vec![G::ScalarField::zero(); n],
-            (0..n).map(|i| (y_vec[i] * s_r[i])).collect(),
+            y_vec
+                .iter()
+                .copied()
+                .hadamard(s_r.iter().copied())
+                .collect(),
         ];
         VectorPolynomial::new(coeffs, n)
     };
@@ -228,15 +274,26 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let y_vec = power_sequence(y, n);
-    let y_inv_vec = power_sequence(y.inverse().expect("nonzero y"), n);
-    let z_vec: Vec<G::ScalarField> = power_sequence(z, q + 1).into_iter().skip(1).collect();
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n)
+            .collect();
+
+    let y_inv_vec: Vec<G::ScalarField> = {
+        let y_inv = y.inverse().expect("nonzero y");
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y_inv))
+            .take(n)
+            .collect()
+    };
+    let z_vec: Vec<G::ScalarField> = successors(Some(z), |succ| Some(*succ * z))
+        .take(q)
+        .collect();
 
     let delta_y_z = {
         let v = mat_mul_l(&z_vec, &circuit.w_r);
-        let l: Vec<G::ScalarField> = (0..n).map(|i| (y_inv_vec[i] * v[i])).collect();
+        let l = y_inv_vec.iter().copied().hadamard(v);
         let r = mat_mul_l(&z_vec, &circuit.w_l);
-        inner_product(l.iter().copied(), r.iter().copied())
+        inner_product(l, r)
     };
 
     println!("Verifier delta_y_z = {}", delta_y_z);
@@ -249,7 +306,6 @@ pub fn verify<G: CurveGroup>(
                 * (delta_y_z + inner_product(z_vec.iter().copied(), circuit.c.iter().copied())),
         ) + {
             let scalars = mat_mul_l(&z_vec, &circuit.w_v)
-                .iter()
                 .map(|zi| x.square() * zi)
                 .collect::<Vec<_>>();
             G::msm_unchecked(&G::normalize_batch(&statement.v), &scalars)
@@ -264,13 +320,20 @@ pub fn verify<G: CurveGroup>(
     {
         let hs_prime: Vec<G::Affine> = create_hs_prime(crs, &y_inv_vec);
 
-        let ww_l = G::msm_unchecked(&hs_prime, &mat_mul_l(&z_vec, &circuit.w_l));
+        let ww_l = G::msm_unchecked(
+            &hs_prime,
+            &mat_mul_l(&z_vec, &circuit.w_l).collect::<Vec<_>>(),
+        );
         let ww_r = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
-            let scalars = hadarmard(&y_inv_vec, &v);
+            // let scalars = hadarmard(&y_inv_vec, &v);
+            let scalars = y_inv_vec.iter().copied().hadamard(v).collect::<Vec<_>>();
             G::msm_unchecked(&crs.ipa_crs.gs, &scalars)
         };
-        let ww_o = G::msm_unchecked(&hs_prime, &mat_mul_l(&z_vec, &circuit.w_o));
+        let ww_o = G::msm_unchecked(
+            &hs_prime,
+            &mat_mul_l(&z_vec, &circuit.w_o).collect::<Vec<_>>(),
+        );
 
         let neg_y_vec = y_vec.iter().map(|yi| -*yi).collect::<Vec<_>>();
 

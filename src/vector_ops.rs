@@ -1,9 +1,9 @@
 use ark_ff::Zero;
 use std::ops::{Add, Mul, Sub};
 
-pub trait Field: Copy + Add<Output = Self> + Mul<Output = Self> {}
+pub trait Field: Copy + Add<Output = Self> + Mul<Output = Self> + Sub<Output = Self> {}
 
-impl<T> Field for T where T: Copy + Add<Output = Self> + Mul<Output = Self> {}
+impl<T> Field for T where T: Copy + Add<Output = Self> + Mul<Output = Self> + Sub<Output = Self> {}
 
 pub struct VectorAdd<I1, I2> {
     iter1: I1,
@@ -125,6 +125,28 @@ pub trait VectorOps: Iterator + Sized {
     {
         VectorScale { iter: self, scalar }
     }
+
+    fn mat_mul_r<I>(self, vector: I) -> MatMulR<Self, I>
+    where
+        I: Clone + IntoIterator<Item = Self::Item>,
+        Self::Item: Field + Zero,
+    {
+        MatMulR {
+            matrix_rows: self,
+            vector,
+        }
+    }
+}
+
+pub fn mat_mul_l<'a, T>(vector: &'a [T], matrix: &'a [Vec<T>]) -> MatMulL<'a, T>
+where
+    T: Field + Zero,
+{
+    MatMulL {
+        vector,
+        matrix,
+        column_index: 0,
+    }
 }
 
 impl<I: Iterator> VectorOps for I {}
@@ -147,6 +169,53 @@ where
     T: Field + Zero,
 {
     iter.into_iter().fold(T::zero(), |acc, x| acc + x)
+}
+
+pub struct MatMulR<M, I> {
+    matrix_rows: M,
+    vector: I,
+}
+
+impl<M, I, T> Iterator for MatMulR<M, I>
+where
+    M: Iterator,
+    M::Item: IntoIterator<Item = T>,
+    I: Clone + IntoIterator<Item = T>,
+    T: Field + Zero,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.matrix_rows
+            .next()
+            .map(|row| inner_product(row, self.vector.clone()))
+    }
+}
+
+pub struct MatMulL<'a, T> {
+    vector: &'a [T],
+    matrix: &'a [Vec<T>],
+    column_index: usize,
+}
+
+impl<'a, T> Iterator for MatMulL<'a, T>
+where
+    T: Field + Zero,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.column_index >= self.matrix.get(0)?.len() {
+            return None;
+        }
+
+        let result = inner_product(
+            self.vector.iter().copied(),
+            self.matrix.iter().map(|row| row[self.column_index]),
+        );
+        self.column_index += 1;
+        Some(result)
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +259,17 @@ mod tests {
         // scale(v3, 5) = [5, 5, 5]
         // inner_product = 3*5 + 5*5 + 7*5 = 15 + 25 + 35 = 75
         assert_eq!(result, 75);
+    }
+
+    #[test]
+    fn test_mat_mul_l() {
+        let vector = vec![2, 3];
+        let matrix = vec![vec![1, 4], vec![2, 5], vec![3, 6]];
+
+        let result: Vec<i32> = mat_mul_l(&vector, &matrix).collect();
+
+        // col 1: 2*1 + 3*2 = 2 + 6 = 8
+        // col 2: 2*4 + 3*5 = 8 + 15 = 23
+        assert_eq!(result, vec![8, 23]);
     }
 }

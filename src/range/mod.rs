@@ -11,7 +11,7 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::ops::Mul;
+use std::{iter::successors, ops::Mul};
 use tracing::instrument;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     },
     range::{
         types::{CRS, Statement, VectorPolynomial, Witness},
-        utils::{bit_decomposition, create_hs_prime, power_sequence},
+        utils::{bit_decomposition, create_hs_prime},
     },
     vector_ops::{VectorOps, sum},
 };
@@ -70,7 +70,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
     // powers of 2
-    let two_vec: Vec<G::ScalarField> = power_sequence(G::ScalarField::from(2u64), n_bits);
+    let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
+        Some(*succ * G::ScalarField::from(2u64))
+    })
+    .take(n_bits)
+    .collect();
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
@@ -109,7 +113,10 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
-    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n_bits)
+            .collect();
 
     let l_poly = {
         let coeffs = vec![
@@ -192,8 +199,16 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let two_vec: Vec<G::ScalarField> = power_sequence(G::ScalarField::from(2u64), n_bits);
-    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits);
+    let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
+        Some(*succ * G::ScalarField::from(2u64))
+    })
+    .take(n_bits)
+    .collect();
+
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n_bits)
+            .collect();
 
     {
         let tt1 = tt1.into_affine();

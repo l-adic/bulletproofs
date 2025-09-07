@@ -1,17 +1,17 @@
 use ark_ff::Field;
 
 // Matrix multiplication of a row vector x (1 x m) with a matrix m (m x n)
-pub fn mat_mul_l<Fr: Field>(x: &[Fr], m: &[Vec<Fr>]) -> Vec<Fr> {
-    assert_eq!(x.len(), m.len(), "Matrix multiplication dimension mismatch");
-    let n = m[0].len();
-    let mut res = vec![Fr::zero(); n];
-    for (j, res_j) in res.iter_mut().enumerate() {
-        for (i, x_i) in x.iter().enumerate() {
-            *res_j += *x_i * m[i][j];
-        }
-    }
-    res
-}
+//pub fn mat_mul_l<Fr: Field>(x: &[Fr], m: &[Vec<Fr>]) -> Vec<Fr> {
+//    assert_eq!(x.len(), m.len(), "Matrix multiplication dimension mismatch");
+//    let n = m[0].len();
+//    let mut res = vec![Fr::zero(); n];
+//    for (j, res_j) in res.iter_mut().enumerate() {
+//        for (i, x_i) in x.iter().enumerate() {
+//            *res_j += *x_i * m[i][j];
+//        }
+//    }
+//    res
+//}
 
 pub fn mat_mul_r<Fr: Field>(m: &[Vec<Fr>], x: &[Fr]) -> Vec<Fr> {
     assert_eq!(

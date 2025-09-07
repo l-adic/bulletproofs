@@ -19,14 +19,6 @@ pub(super) fn bit_decomposition<Fr: PrimeField>(a: Fr) -> Vec<Fr> {
     bits
 }
 
-pub(crate) fn power_sequence<F: Field>(base: F, n: usize) -> Vec<F> {
-    let mut res = vec![F::one(); n];
-    for i in 1..n {
-        res[i] = res[i - 1] * base;
-    }
-    res
-}
-
 pub(super) fn create_hs_prime<G: CurveGroup>(
     hs: &[G::Affine],
     y: G::ScalarField,
