@@ -121,7 +121,7 @@ pub fn prove<G: CurveGroup>(
 
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
 pub fn verify<G: CurveGroup>(
-    mut verifier_state: VerifierState,
+    verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<()>
@@ -261,7 +261,7 @@ mod tests_proof {
             let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
             fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
             fast_verifier_state.ratchet().expect("failed to ratchet");
-            verify(fast_verifier_state, &crs, &statement).expect("proof should verify");
+            verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
           }
 
           info!("Testing prove/verify with protocol (2)");
@@ -287,7 +287,7 @@ mod tests_proof {
             verifier_state.public_points(&[statement.p]).expect("cannot add statment");
             verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
             verifier_state.ratchet().expect("failed to ratchet");
-            extended::verify(verifier_state, &crs, &statement).expect("proof should verify");
+            extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
 
           }
 

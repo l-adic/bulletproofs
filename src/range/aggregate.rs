@@ -201,7 +201,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
 pub fn verify<G: CurveGroup>(
-    mut verifier_state: spongefish::VerifierState,
+    verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<()> {
@@ -352,7 +352,7 @@ mod tests_range {
                 .public_points(&statement.v)
                 .expect("cannot add statment");
             verifier_state.ratchet().expect("failed to ratchet");
-            verify(verifier_state, &crs, &statement).expect("proof should verify")
+            verify(&mut verifier_state, &crs, &statement).expect("proof should verify")
         }
     }
 }

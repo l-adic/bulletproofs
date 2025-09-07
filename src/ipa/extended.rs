@@ -51,7 +51,7 @@ pub fn prove<G: CurveGroup>(
 }
 
 pub fn verify<G: CurveGroup>(
-    mut verifier_state: VerifierState,
+    verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
 ) -> ProofResult<()>

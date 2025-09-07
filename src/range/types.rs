@@ -2,7 +2,6 @@ use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, Field, PrimeField};
 use ark_std::log2;
 use std::ops::Mul;
-use tracing::instrument;
 
 use crate::ipa::types::CrsSize;
 use crate::{
@@ -68,13 +67,13 @@ impl<G: CurveGroup> Statement<G> {
     }
 }
 
-pub(super) struct VectorPolynomial<Fr: Field> {
+pub(crate) struct VectorPolynomial<Fr: Field> {
     pub coeffs: Vec<Vec<Fr>>,
     n: usize,
 }
 
 impl<Fr: Field> VectorPolynomial<Fr> {
-    pub fn new(coeffs: Vec<Vec<Fr>>, n: usize) -> Self {
+    pub(crate) fn new(coeffs: Vec<Vec<Fr>>, n: usize) -> Self {
         assert!(!coeffs.is_empty(), "Coefficient vector cannot be empty");
         assert!(n > 0, "Coefficient vectors cannot be empty");
         for coeff in &coeffs {
@@ -84,7 +83,7 @@ impl<Fr: Field> VectorPolynomial<Fr> {
     }
 
     #[cfg(test)]
-    pub fn rand<Rng: rand::Rng>(degree: usize, n: usize, rng: &mut Rng) -> Self
+    pub(crate) fn rand<Rng: rand::Rng>(degree: usize, n: usize, rng: &mut Rng) -> Self
     where
         Fr: PrimeField,
     {
@@ -94,13 +93,8 @@ impl<Fr: Field> VectorPolynomial<Fr> {
         }
         Self::new(coeffs, n)
     }
-}
 
-// The inner product is defined for l, r \elem F^{n}[X] (of the same degreee d) as
-// <l,r> = \sum_{i=0}^{d} \sum_{j=0}^{i}} <l_i, r_j> X^{i+j}
-impl<Fr: Field> VectorPolynomial<Fr> {
-    #[instrument(skip(self, rhs))]
-    pub(super) fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
+    pub(crate) fn inner_product(&self, rhs: &Self) -> Vec<Fr> {
         assert!(
             self.coeffs.len() == rhs.coeffs.len(),
             "Vector polynomials must have the same degree"
@@ -121,7 +115,7 @@ impl<Fr: Field> VectorPolynomial<Fr> {
         result_coeffs
     }
 
-    pub(super) fn evaluate(&self, x: Fr) -> Vec<Fr> {
+    pub(crate) fn evaluate(&self, x: Fr) -> Vec<Fr> {
         let mut result = vec![Fr::zero(); self.n];
         let mut power_of_x = Fr::one();
         for coeff in &self.coeffs {
