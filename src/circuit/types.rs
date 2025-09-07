@@ -3,7 +3,7 @@ use ark_ff::{Field, UniformRand};
 use ark_std::log2;
 
 use crate::ipa::types::CrsSize;
-use crate::vector_ops::inner_product;
+use crate::vector_ops::{hadarmard, inner_product};
 
 pub struct CRS<G: CurveGroup> {
     pub ipa_crs: crate::ipa::types::CRS<G>,
@@ -144,8 +144,6 @@ impl<Fr> Circuit<Fr> {
     where
         Fr: Field,
     {
-        use crate::circuit::utils::hadarmard;
-
         // Check arithmetic constraint: a_l ⊙ a_r = a_o
         let expected_a_o = hadarmard(&witness.a_l, &witness.a_r);
         if witness.a_o != expected_a_o {
@@ -196,8 +194,6 @@ impl<Fr> Circuit<Fr> {
     where
         Fr: Field + UniformRand,
     {
-        use crate::circuit::utils::hadarmard;
-
         // Step 1: Generate witness with arithmetic constraint a_l * a_r = a_o
         let a_l: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
         let a_r: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
@@ -241,7 +237,6 @@ impl<Fr> Circuit<Fr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::utils::hadarmard;
     use ark_secp256k1::Fr;
     use rand::rngs::OsRng;
 

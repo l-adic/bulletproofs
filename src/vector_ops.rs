@@ -125,17 +125,6 @@ pub trait VectorOps: Iterator + Sized {
     {
         VectorScale { iter: self, scalar }
     }
-
-    fn mat_mul_r<I>(self, vector: I) -> MatMulR<Self, I>
-    where
-        I: Clone + IntoIterator<Item = Self::Item>,
-        Self::Item: Field + Zero,
-    {
-        MatMulR {
-            matrix_rows: self,
-            vector,
-        }
-    }
 }
 
 pub fn mat_mul_l<'a, T>(vector: &'a [T], matrix: &'a [Vec<T>]) -> MatMulL<'a, T>
@@ -147,6 +136,29 @@ where
         matrix,
         column_index: 0,
     }
+}
+
+pub fn mat_mul_r<T>(matrix: &[Vec<T>], vector: &[T]) -> Vec<T>
+where
+    T: Field + Zero,
+{
+    assert_eq!(
+        matrix[0].len(),
+        vector.len(),
+        "Matrix multiplication dimension mismatch"
+    );
+    matrix
+        .iter()
+        .map(|row| inner_product(row.iter().copied(), vector.iter().copied()))
+        .collect()
+}
+
+pub fn hadarmard<T>(a: &[T], b: &[T]) -> Vec<T>
+where
+    T: Field,
+{
+    assert_eq!(a.len(), b.len(), "Hadamard product dimension mismatch");
+    a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect()
 }
 
 impl<I: Iterator> VectorOps for I {}
@@ -171,41 +183,20 @@ where
     iter.into_iter().fold(T::zero(), |acc, x| acc + x)
 }
 
-pub struct MatMulR<M, I> {
-    matrix_rows: M,
-    vector: I,
-}
-
-impl<M, I, T> Iterator for MatMulR<M, I>
-where
-    M: Iterator,
-    M::Item: IntoIterator<Item = T>,
-    I: Clone + IntoIterator<Item = T>,
-    T: Field + Zero,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.matrix_rows
-            .next()
-            .map(|row| inner_product(row, self.vector.clone()))
-    }
-}
-
 pub struct MatMulL<'a, T> {
     vector: &'a [T],
     matrix: &'a [Vec<T>],
     column_index: usize,
 }
 
-impl<'a, T> Iterator for MatMulL<'a, T>
+impl<T> Iterator for MatMulL<'_, T>
 where
     T: Field + Zero,
 {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.column_index >= self.matrix.get(0)?.len() {
+        if self.column_index >= self.matrix.first()?.len() {
             return None;
         }
 
@@ -271,5 +262,17 @@ mod tests {
         // col 1: 2*1 + 3*2 = 2 + 6 = 8
         // col 2: 2*4 + 3*5 = 8 + 15 = 23
         assert_eq!(result, vec![8, 23]);
+    }
+
+    #[test]
+    fn test_mat_mul_r() {
+        let matrix = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let vector = vec![1, 2, 3];
+
+        let result = mat_mul_r(&matrix, &vector);
+
+        // row 1: 1*1 + 2*2 + 3*3 = 1 + 4 + 9 = 14
+        // row 2: 4*1 + 5*2 + 6*3 = 4 + 10 + 18 = 32
+        assert_eq!(result, vec![14, 32]);
     }
 }

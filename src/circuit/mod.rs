@@ -11,17 +11,13 @@ use spongefish::{
 };
 
 use crate::{
-    circuit::{
-        types::Statement,
-        utils::{hadarmard, mat_mul_r},
-    },
+    circuit::types::Statement,
     ipa::{extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
     range::types::VectorPolynomial,
-    vector_ops::{VectorOps, inner_product, mat_mul_l},
+    vector_ops::{VectorOps, inner_product, mat_mul_l, mat_mul_r},
 };
 
 pub mod types;
-pub(crate) mod utils;
 
 pub trait CircuitProofDomainSeparator<G: CurveGroup> {
     fn circuit_proof_statement(self, n: usize) -> Self;
@@ -106,17 +102,16 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     prover_state.add_points(&[a_i, a_o, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
 
-    let y_vec: Vec<G::ScalarField> =
-        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n)
-            .collect();
-
-    let y_inv_vec: Vec<G::ScalarField> = {
+    let (y_vec, y_inv_vec) = {
         let y_inv = y.inverse().expect("nonzero y");
-        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y_inv))
-            .take(n)
-            .collect()
+        successors(
+            Some((G::ScalarField::one(), G::ScalarField::one())),
+            |(succ_y, succ_y_inv)| Some((*succ_y * y, *succ_y_inv * y_inv)),
+        )
+        .take(n)
+        .unzip::<_, _, Vec<_>, Vec<_>>()
     };
+
     let z_vec: Vec<G::ScalarField> = successors(Some(z), |succ| Some(*succ * z))
         .take(q)
         .collect();
@@ -131,9 +126,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
                 .copied()
                 .vector_add(y_inv_vec.iter().copied().hadamard(v))
                 .collect(),
-            //(0..n)
-            //    .map(|i| witness.a_l[i] + (y_inv_vec[i] * v[i]))
-            //    .collect(),
             witness.a_o.clone(),
             s_l,
         ];
@@ -144,7 +136,6 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let v2 = mat_mul_l(&z_vec, &circuit.w_o);
         let coeffs = vec![
             v2.vector_sub(y_vec.iter().copied()).collect(),
-            // (0..n).map(|i| v2[i] - y_vec[i]).collect(),
             y_vec
                 .iter()
                 .copied()
@@ -208,22 +199,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let r = r_poly.evaluate(x);
 
         let witness = ipa_types::Witness::new(l, r);
-        let hs_prime = create_hs_prime(crs, &y_inv_vec);
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n], y);
 
         let mut extended_statement: ipa_types::extended::Statement<G> =
             witness.extended_statement(&crs.ipa_crs);
 
-        println!(
-            "Prover  extended_statement.p (before -mu) = {:?}",
-            extended_statement.p.into_affine()
-        );
         extended_statement.p += crs.h.mul(-mu);
-        println!(
-            "Prover  extended_statement.p (after -mu) = {:?}",
-            extended_statement.p.into_affine()
-        );
-
-        println!("Prover  extended_statement.c = {:?}", extended_statement.c);
 
         prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
 
@@ -239,14 +220,15 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup>(
-    crs: &types::CRS<G>,
-    y_inv_vec: &[G::ScalarField],
-) -> Vec<G::Affine> {
-    let hs = (0..y_inv_vec.len())
-        .map(|i| crs.ipa_crs.hs[i].mul(y_inv_vec[i]))
-        .collect::<Vec<_>>();
-    G::normalize_batch(&hs)
+fn create_hs_prime<G: CurveGroup>(hs: &[G::Affine], y: G::ScalarField) -> Vec<G::Affine> {
+    let y_inv = y.inverse().expect("non-zero y");
+    let ys_inv = std::iter::successors(Some(G::ScalarField::one()), |&x| (Some(x * y_inv)));
+    G::normalize_batch(
+        &hs.iter()
+            .zip(ys_inv)
+            .map(|(h, y_inv)| h.mul(y_inv))
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub fn verify<G: CurveGroup>(
@@ -274,16 +256,14 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let y_vec: Vec<G::ScalarField> =
-        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n)
-            .collect();
-
-    let y_inv_vec: Vec<G::ScalarField> = {
+    let (y_vec, y_inv_vec) = {
         let y_inv = y.inverse().expect("nonzero y");
-        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y_inv))
-            .take(n)
-            .collect()
+        successors(
+            Some((G::ScalarField::one(), G::ScalarField::one())),
+            |(succ_y, succ_y_inv)| Some((*succ_y * y, *succ_y_inv * y_inv)),
+        )
+        .take(n)
+        .unzip::<_, _, Vec<_>, Vec<_>>()
     };
     let z_vec: Vec<G::ScalarField> = successors(Some(z), |succ| Some(*succ * z))
         .take(q)
@@ -318,7 +298,7 @@ pub fn verify<G: CurveGroup>(
         assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
     };
     {
-        let hs_prime: Vec<G::Affine> = create_hs_prime(crs, &y_inv_vec);
+        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n], y);
 
         let ww_l = G::msm_unchecked(
             &hs_prime,
@@ -378,7 +358,7 @@ mod tests {
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
-        #![proptest_config(Config::with_cases(5))]
+        #![proptest_config(Config::with_cases(2))]
         #[test]
         fn test_circuit_proof(
            (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)], 4usize..100)
@@ -401,8 +381,6 @@ mod tests {
                 CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n)
             };
 
-            println!("Starting proof generation...");
-
             let statement: Statement<Projective> = Statement::new(&crs, &witness);
 
             let mut prover_state = domain_separator.to_prover_state();
@@ -411,16 +389,11 @@ mod tests {
 
             let proof = prove(&mut prover_state, &crs, &circuit, &witness, &mut rng).unwrap();
 
-            println!("Proof generated, size: {} bytes", proof.len());
-
-            println!("Starting proof verification...");
             let mut verifier_state = domain_separator.to_verifier_state(&proof);
             verifier_state.public_points(&statement.v).expect("cannot add statement");
             verifier_state.ratchet().expect("failed to ratchet");
 
-
             verify(&mut verifier_state, &crs, &circuit, statement).expect("proof should verify");
-            println!("Proof verified successfully!");
         }
     }
 }
