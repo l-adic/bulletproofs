@@ -3,7 +3,7 @@ use ark_ff::{Field, UniformRand};
 use ark_std::log2;
 
 use crate::ipa::types::CrsSize;
-use crate::vector_ops::{hadarmard, inner_product};
+use crate::vector_ops::{hadamard, inner_product};
 
 pub struct CRS<G: CurveGroup> {
     pub ipa_crs: crate::ipa::types::CRS<G>,
@@ -145,7 +145,7 @@ impl<Fr> Circuit<Fr> {
         Fr: Field,
     {
         // Check arithmetic constraint: a_l ⊙ a_r = a_o
-        let expected_a_o = hadarmard(&witness.a_l, &witness.a_r);
+        let expected_a_o = hadamard(&witness.a_l, &witness.a_r).collect::<Vec<_>>();
         if witness.a_o != expected_a_o {
             return false;
         }
@@ -197,7 +197,7 @@ impl<Fr> Circuit<Fr> {
         // Step 1: Generate witness with arithmetic constraint a_l * a_r = a_o
         let a_l: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
         let a_r: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
-        let a_o = hadarmard(&a_l, &a_r); // a_l ⊙ a_r = a_o
+        let a_o = hadamard(&a_l, &a_r).collect::<Vec<_>>(); // a_l ⊙ a_r = a_o
 
         // Step 2: Generate random v (auxiliary witness)
         let v: Vec<Fr> = (0..n).map(|_| Fr::rand(rng)).collect();
@@ -249,7 +249,7 @@ mod tests {
         let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
 
         // Verify arithmetic constraint: a_l ⊙ a_r = a_o
-        let expected_a_o = hadarmard(&witness.a_l, &witness.a_r);
+        let expected_a_o = hadamard(&witness.a_l, &witness.a_r).collect::<Vec<_>>();
         assert_eq!(
             witness.a_o, expected_a_o,
             "Arithmetic constraint a_l ⊙ a_r = a_o not satisfied"

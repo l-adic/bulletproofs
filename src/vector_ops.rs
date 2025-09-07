@@ -146,12 +146,12 @@ where
     }
 }
 
-pub fn hadarmard<T>(a: &[T], b: &[T]) -> Vec<T>
+pub fn hadamard<'a, T>(a: &'a [T], b: &'a [T]) -> impl Iterator<Item = T> + 'a
 where
     T: Field,
 {
     assert_eq!(a.len(), b.len(), "Hadamard product dimension mismatch");
-    a.iter().zip(b.iter()).map(|(x, y)| *x * *y).collect()
+    a.iter().zip(b.iter()).map(|(x, y)| *x * *y)
 }
 
 impl<I: Iterator> VectorOps for I {}

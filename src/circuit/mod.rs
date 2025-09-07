@@ -306,7 +306,7 @@ pub fn verify<G: CurveGroup>(
         );
         let ww_r = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
-            // let scalars = hadarmard(&y_inv_vec, &v);
+            // let scalars = hadamard(&y_inv_vec, &v).collect::<Vec<_>>();
             let scalars = y_inv_vec.iter().copied().hadamard(v).collect::<Vec<_>>();
             G::msm_unchecked(&crs.ipa_crs.gs, &scalars)
         };
