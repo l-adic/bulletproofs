@@ -135,19 +135,15 @@ where
     }
 }
 
-pub fn mat_mul_r<T>(matrix: &[Vec<T>], vector: &[T]) -> Vec<T>
+pub fn mat_mul_r<'a, T>(matrix: &'a [Vec<T>], vector: &'a [T]) -> MatMulR<'a, T>
 where
     T: Field + Zero,
 {
-    assert_eq!(
-        matrix[0].len(),
-        vector.len(),
-        "Matrix multiplication dimension mismatch"
-    );
-    matrix
-        .iter()
-        .map(|row| inner_product(row.iter(), vector.iter()))
-        .collect()
+    MatMulR {
+        matrix,
+        vector,
+        row_index: 0,
+    }
 }
 
 pub fn hadarmard<T>(a: &[T], b: &[T]) -> Vec<T>
@@ -188,6 +184,12 @@ pub struct MatMulL<'a, T> {
     column_index: usize,
 }
 
+pub struct MatMulR<'a, T> {
+    matrix: &'a [Vec<T>],
+    vector: &'a [T],
+    row_index: usize,
+}
+
 impl<T> Iterator for MatMulL<'_, T>
 where
     T: Field + Zero,
@@ -204,6 +206,26 @@ where
             self.matrix.iter().map(|row| row[self.column_index]),
         );
         self.column_index += 1;
+        Some(result)
+    }
+}
+
+impl<T> Iterator for MatMulR<'_, T>
+where
+    T: Field + Zero,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row = self.matrix.get(self.row_index)?;
+        assert_eq!(
+            row.len(),
+            self.vector.len(),
+            "Matrix multiplication dimension mismatch"
+        );
+
+        let result = inner_product(row.iter(), self.vector.iter());
+        self.row_index += 1;
         Some(result)
     }
 }
@@ -281,7 +303,7 @@ mod tests {
             .collect::<Vec<_>>();
         let vector = vec![1, 2, 3].into_iter().map(Fr::from).collect::<Vec<_>>();
 
-        let result = mat_mul_r(&matrix, &vector);
+        let result: Vec<Fr> = mat_mul_r(&matrix, &vector).collect();
 
         // row 1: 1*1 + 2*2 + 3*3 = 1 + 4 + 9 = 14
         // row 2: 4*1 + 5*2 + 6*3 = 4 + 10 + 18 = 32

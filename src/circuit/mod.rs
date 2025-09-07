@@ -184,7 +184,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             let init = x.pow([2])
                 * inner_product(
                     z_vec.iter().copied(),
-                    mat_mul_r(&circuit.w_v, &witness.gamma).iter().copied(),
+                    mat_mul_r(&circuit.w_v, &witness.gamma),
                 );
             taus.iter().enumerate().fold(init, |acc, (i, tau_i_opt)| {
                 acc + tau_i_opt
