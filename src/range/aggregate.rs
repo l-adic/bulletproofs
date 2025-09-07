@@ -1,10 +1,5 @@
-use crate::ipa::extended::{ExtendedBulletproofDomainSeparator, ExtendedStatement};
-use crate::ipa::{self, types as ipa_types};
-use crate::range::utils::{VectorPolynomial, bit_decomposition, create_hs_prime};
-use crate::range::{types::CRS, utils::power_sequence};
-use crate::vector_ops::{VectorOps, sum};
 use ark_ec::CurveGroup;
-use ark_ff::{BigInteger, Field, One, PrimeField, UniformRand, Zero};
+use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
     DomainSeparator, ProofResult, ProverState,
     codecs::arkworks_algebra::{
@@ -14,6 +9,16 @@ use spongefish::{
 };
 use std::ops::Mul;
 use tracing::instrument;
+
+use crate::range::{
+    types::{CRS, VectorPolynomial},
+    utils::{bit_decomposition, create_hs_prime, power_sequence},
+};
+use crate::vector_ops::{VectorOps, sum};
+use crate::{
+    ipa::{self, extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
+    range::types::aggregate::{Statement, Witness},
+};
 
 #[allow(dead_code)]
 pub trait AggregatedRangeProofDomainSeparator<G: CurveGroup> {
@@ -39,48 +44,6 @@ where
             .add_scalars(3, "round-message: t_x, mu, t_hat")
             .add_extended_bulletproof(n_bits * m);
         self
-    }
-}
-
-pub struct Witness<Fr> {
-    pub v: Vec<Fr>,
-    pub gamma: Vec<Fr>,
-    n_bits: usize,
-}
-
-impl<Fr: PrimeField> Witness<Fr> {
-    pub fn new<Rng: rand::Rng>(v: Vec<Fr>, n_bits: usize, rang: &mut Rng) -> Self
-    where
-        Fr: PrimeField,
-    {
-        for val in &v {
-            assert!(val.into_bigint().num_bits() as usize <= n_bits);
-        }
-
-        let gamma = (0..v.len()).map(|_| Fr::rand(rang)).collect();
-        Witness { v, gamma, n_bits }
-    }
-
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> usize {
-        self.v.len()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Statement<G> {
-    pub v: Vec<G>,
-    n_bits: usize,
-}
-
-impl<G: CurveGroup> Statement<G> {
-    pub fn new(crs: &CRS<G>, witness: &Witness<G::ScalarField>) -> Self {
-        Statement {
-            v: (0..witness.len())
-                .map(|i| crs.g.mul(witness.v[i]) + crs.h.mul(witness.gamma[i]))
-                .collect(),
-            n_bits: witness.n_bits,
-        }
     }
 }
 
@@ -215,12 +178,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let l: Vec<G::ScalarField> = l_poly.evaluate(x);
         let r: Vec<G::ScalarField> = r_poly.evaluate(x);
 
-        let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
+        let witness = ipa_types::Witness::new(l, r);
 
         let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
 
-        let mut extended_statement: ExtendedStatement<G> =
-            ipa::extended::extended_statement(gs, &hs_prime, &witness);
+        let mut extended_statement = witness.extended_statement(&crs.ipa_crs);
 
         extended_statement.p += crs.h.mul(-mu);
 
@@ -320,7 +282,7 @@ pub fn verify<G: CurveGroup>(
             }
         };
 
-        let extended_statement = ExtendedStatement {
+        let extended_statement = ipa_types::extended::Statement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
         };
@@ -353,7 +315,7 @@ mod tests_range {
         ) {
 
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(n_bits * m);
+            let crs: CRS<Projective> = CRS::rand(n_bits * m, &mut rng);
 
             // Generate m random values in range [0, 2^n_bits)
             let max_value = (1u128 << n_bits.min(127)) - 1;

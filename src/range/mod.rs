@@ -2,18 +2,6 @@ pub mod aggregate;
 pub mod types;
 pub(crate) mod utils;
 
-use crate::{
-    ipa::{
-        self,
-        extended::{self, ExtendedBulletproofDomainSeparator, ExtendedStatement},
-        types as ipa_types,
-    },
-    range::{
-        types::{CRS, Statement, Witness},
-        utils::{VectorPolynomial, bit_decomposition, create_hs_prime, power_sequence},
-    },
-    vector_ops::{VectorOps, sum},
-};
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
@@ -25,6 +13,18 @@ use spongefish::{
 };
 use std::ops::Mul;
 use tracing::instrument;
+
+use crate::{
+    ipa::{
+        extended::{self, ExtendedBulletproofDomainSeparator},
+        types::{self as ipa_types},
+    },
+    range::{
+        types::{CRS, Statement, VectorPolynomial, Witness},
+        utils::{bit_decomposition, create_hs_prime, power_sequence},
+    },
+    vector_ops::{VectorOps, sum},
+};
 
 pub trait RangeProofDomainSeparator<G: CurveGroup> {
     fn range_proof_statement(self) -> Self;
@@ -157,12 +157,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let l: Vec<G::ScalarField> = l_poly.evaluate(x);
         let r: Vec<G::ScalarField> = r_poly.evaluate(x);
 
-        let witness = ipa_types::Witness::new(ipa_types::Vector(l), ipa_types::Vector(r));
+        let witness = ipa_types::Witness::new(l, r);
 
         let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
-        let mut extended_statement: ExtendedStatement<G> =
-            ipa::extended::extended_statement(gs, &hs_prime, &witness);
+        let mut extended_statement: ipa_types::extended::Statement<G> =
+            witness.extended_statement(&crs.ipa_crs);
 
         extended_statement.p += crs.h.mul(-mu);
 
@@ -236,7 +236,7 @@ pub fn verify<G: CurveGroup>(
             }
         };
 
-        let extended_statement = ExtendedStatement {
+        let extended_statement = ipa_types::extended::Statement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
         };
@@ -266,7 +266,7 @@ mod tests_range {
         fn test_range_proof(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
 
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(n);
+            let crs: CRS<Projective> = CRS::rand(n, &mut rng);
             // pick a random Fr value in the range [0, 2^n) via bigint conversion
             let max_value = (1u128 << n) - 1;
             let v = Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value));

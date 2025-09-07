@@ -1,39 +1,10 @@
 use ark_ec::CurveGroup;
-use ark_ff::{Field, UniformRand};
+use ark_ff::UniformRand;
 use proptest::prelude::*;
 use rand::rngs::OsRng;
-use rayon::prelude::*;
 use std::ops::{Add, Mul};
 
-#[derive(Clone, Debug)]
-pub struct Vector<Fr>(pub Vec<Fr>);
-
-impl<Fr: Field> Vector<Fr> {
-    pub fn rand(size: u64) -> Self {
-        let mut v = Vec::new();
-        for _ in 0..size {
-            v.push(UniformRand::rand(&mut OsRng));
-        }
-        Vector(v)
-    }
-}
-
-impl<Fr: Field> Vector<Fr> {
-    pub fn add(&self, rhs: &Self) -> Vector<Fr> {
-        let mut result = Vec::new();
-        for (a, b) in self.0.iter().zip(rhs.0.iter()) {
-            result.push(*a + *b);
-        }
-        Vector(result)
-    }
-
-    pub fn dot(&self, b: &Self) -> Fr {
-        self.0
-            .iter()
-            .zip(b.0.iter())
-            .fold(Fr::zero(), |acc, (x, y)| acc + (*x * *y))
-    }
-}
+use crate::vector_ops::{VectorOps, inner_product};
 
 #[derive(Clone, Debug)]
 pub struct CRS<G: CurveGroup> {
@@ -61,16 +32,10 @@ impl Arbitrary for CrsSize {
 }
 
 impl<G: CurveGroup> CRS<G> {
-    pub fn rand(size: CrsSize) -> Self {
+    pub fn rand<Rng: rand::Rng>(size: CrsSize, rng: &mut Rng) -> Self {
         let size = 1 << size.log2_size;
-        let gs = (0..size)
-            .into_par_iter()
-            .map(|_| G::Affine::rand(&mut OsRng))
-            .collect();
-        let hs = (0..size)
-            .into_par_iter()
-            .map(|_| G::Affine::rand(&mut OsRng))
-            .collect();
+        let gs = (0..size).map(|_| G::Affine::rand(rng)).collect();
+        let hs = (0..size).map(|_| G::Affine::rand(&mut OsRng)).collect();
         let u = G::Affine::rand(&mut OsRng);
         CRS { gs, hs, u }
     }
@@ -81,44 +46,86 @@ impl<G: CurveGroup> CRS<G> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Witness<Fr> {
-    pub a: Vector<Fr>,
-    pub b: Vector<Fr>,
-    c: Fr,
+pub struct Witness<G: CurveGroup> {
+    pub a: Vec<G::ScalarField>,
+    pub b: Vec<G::ScalarField>,
+    c: G::ScalarField,
 }
 
-impl<Fr: Field> Witness<Fr> {
-    pub fn new(a: Vector<Fr>, b: Vector<Fr>) -> Self {
-        let c = a.dot(&b);
+impl<G: CurveGroup> Witness<G> {
+    pub fn new(a: Vec<G::ScalarField>, b: Vec<G::ScalarField>) -> Self {
+        let c = inner_product(a.iter().copied(), b.iter().copied());
         Witness { a, b, c }
     }
 
-    pub fn rand(size: u64) -> Self {
-        let a = Vector::rand(size);
-        let b = Vector::rand(size);
-        let c = a.dot(&b);
+    pub fn rand<Rng: rand::Rng>(size: u64, rng: &mut Rng) -> Self {
+        let a = (0..size)
+            .map(|_| G::ScalarField::rand(rng))
+            .collect::<Vec<_>>();
+        let b = (0..size)
+            .map(|_| G::ScalarField::rand(rng))
+            .collect::<Vec<_>>();
+        let c = inner_product(a.iter().copied(), b.iter().copied());
         Witness { a, b, c }
     }
 
-    pub fn c(&self) -> Fr {
+    pub fn c(&self) -> G::ScalarField {
         self.c
     }
+
+    pub fn statement(&self, crs: &CRS<G>) -> Statement<G> {
+        let g: G = G::msm_unchecked(&crs.gs, &self.a);
+        let h: G = G::msm_unchecked(&crs.hs, &self.b);
+        let p: G = g.add(&h).add(&crs.u.mul(self.c));
+        Statement { p }
+    }
+
+    pub fn extended_statement(&self, crs: &CRS<G>) -> extended::Statement<G> {
+        let bases: Vec<G::Affine> = crs
+            .gs
+            .iter()
+            .copied()
+            .chain(crs.hs.iter().copied())
+            .collect();
+        let scalars: Vec<G::ScalarField> = self
+            .a
+            .iter()
+            .copied()
+            .chain(self.b.iter().copied())
+            .collect();
+        let p = G::msm_unchecked(&bases, &scalars);
+        extended::Statement { p, c: self.c() }
+    }
 }
 
-impl<Fr: Field> Add for Witness<Fr> {
-    type Output = Witness<Fr>;
+impl<G: CurveGroup> Add for Witness<G> {
+    type Output = Witness<G>;
 
     fn add(self, rhs: Self) -> Self::Output {
+        assert_eq!(self.a.len(), rhs.a.len());
+        assert_eq!(self.b.len(), rhs.b.len());
+        let a = self
+            .a
+            .iter()
+            .copied()
+            .vector_add(rhs.a.iter().copied())
+            .collect();
+        let b = self
+            .b
+            .iter()
+            .copied()
+            .vector_add(rhs.b.iter().copied())
+            .collect();
         Witness {
-            a: self.a.add(&rhs.a),
-            b: self.b.add(&rhs.b),
+            a,
+            b,
             c: self.c + rhs.c,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Statement<G> {
+pub struct Statement<G: CurveGroup> {
     pub p: G,
 }
 
@@ -130,11 +137,13 @@ impl<G: CurveGroup> Add for Statement<G> {
     }
 }
 
-pub fn statement<G: CurveGroup>(crs: &CRS<G>, inputs: &Witness<G::ScalarField>) -> Statement<G> {
-    let g: G = G::msm_unchecked(&crs.gs, &inputs.a.0);
-    let h: G = G::msm_unchecked(&crs.hs, &inputs.b.0);
-    let p: G = g.add(&h).add(&crs.u.mul(inputs.c));
-    Statement { p }
+pub mod extended {
+    use ark_ec::CurveGroup;
+
+    pub struct Statement<G: CurveGroup> {
+        pub p: G,
+        pub c: G::ScalarField,
+    }
 }
 
 #[cfg(test)]
@@ -146,16 +155,17 @@ mod tests {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn statements_are_additive((crs, inputs1, inputs2) in any::<CrsSize>().prop_map(|crs_size| {
-          let crs: CRS<Projective> = CRS::rand(crs_size);
+      fn statements_are_additive((crs, witness1, witness2) in any::<CrsSize>().prop_map(|crs_size| {
+          let mut rng = OsRng;
+          let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
-          let inputs1 = Witness::rand(n);
-          let inputs2 = Witness::rand(n);
-          (crs, inputs1, inputs2)
+          let witness1 = Witness::rand(n, &mut rng);
+          let witness2 = Witness::rand(n, &mut rng);
+          (crs, witness1, witness2)
       })) {
-          let c1 = statement(&crs, &inputs1);
-          let c2 = statement(&crs, &inputs2);
-          let c =  statement(&crs, &(inputs1 + inputs2));
+          let c1 = witness1.statement(&crs);
+          let c2 = witness2.statement(&crs);
+          let c =  (witness1 + witness2).statement(&crs);
           prop_assert!(c.p == c1.p + c2.p);
       }
     }
