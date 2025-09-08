@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use ark_secp256k1::{Fr, Projective};
 use bulletproofs::{
+    circuit::{
+        CircuitProofDomainSeparator, prove as circuit_prove,
+        types::{CRS as CircuitCRS, Circuit, Statement as CircuitStatement},
+        verify as circuit_verify,
+    },
     ipa::{
         BulletproofDomainSeparator, prove as ipa_prove,
         types::{CRS as IpaCRS, CrsSize, Witness as IpaWitness},
@@ -73,7 +78,7 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
                 verifier_state.public_points(&[stmt.p]).unwrap();
                 verifier_state.ratchet().unwrap();
 
-                ipa_verify(verifier_state, &crs, &stmt).unwrap();
+                ipa_verify(&mut verifier_state, &crs, &stmt).unwrap();
                 black_box(())
             })
         });
@@ -124,7 +129,7 @@ fn bench_range_prove_verify_cycle(c: &mut Criterion, crs: &RangeCRS<Projective>,
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v]).unwrap();
             verifier_state.ratchet().unwrap();
-            range_verify::<Projective>(verifier_state, crs, &statement).unwrap();
+            range_verify::<Projective>(&mut verifier_state, crs, &statement).unwrap();
             black_box(())
         })
     });
@@ -191,7 +196,7 @@ fn bench_aggregate_range_prove_verify_cycle(
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&statement.v).unwrap();
             verifier_state.ratchet().unwrap();
-            aggregate_verify::<Projective>(verifier_state, crs, &statement).unwrap();
+            aggregate_verify::<Projective>(&mut verifier_state, crs, &statement).unwrap();
             black_box(())
         })
     });
@@ -210,6 +215,89 @@ fn bench_range_proofs(c: &mut Criterion) {
     bench_range_prove_verify_cycle(c, &shared_crs, 64);
 }
 
+fn bench_circuit_prove_verify_cycle(
+    c: &mut Criterion,
+    crs: &CircuitCRS<Projective>,
+    n: usize, // circuit dimension (number of variables)
+    q: usize, // number of constraints
+) {
+    let mut group = c.benchmark_group(format!("circuit_{}_{}", n, q));
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(30));
+
+    let mut rng = OsRng;
+
+    // Generate circuit and witness
+    let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
+    assert!(
+        circuit.is_satisfied_by(&witness),
+        "Circuit not satisfied by witness"
+    );
+
+    let domain_separator = {
+        let domain_separator = DomainSeparator::new("circuit-benchmark");
+        let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(
+            domain_separator,
+            witness.v.len(),
+        )
+        .ratchet();
+        CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n)
+    };
+
+    let statement: CircuitStatement<Projective> = CircuitStatement::new(crs, &witness);
+    let mut proofs: HashMap<String, Vec<u8>> = HashMap::new();
+    let key = format!("{}_{}", n, q);
+
+    // Benchmark prove
+    group.bench_with_input(
+        BenchmarkId::new("prove", format!("{}_{}", n, q)),
+        &(n, q),
+        |b, _| {
+            b.iter(|| {
+                let mut prover_state = domain_separator.to_prover_state();
+                prover_state.public_points(&statement.v).unwrap();
+                prover_state.ratchet().unwrap();
+
+                let proof =
+                    circuit_prove(&mut prover_state, crs, &circuit, &witness, &mut rng).unwrap();
+                proofs.insert(key.clone(), proof.clone());
+                black_box(proof)
+            })
+        },
+    );
+
+    // Benchmark verify using the same domain separator and pre-generated proof
+    group.bench_with_input(
+        BenchmarkId::new("verify", format!("{}_{}", n, q)),
+        &(n, q),
+        |b, _| {
+            b.iter(|| {
+                let proof = proofs.get(&key).unwrap();
+                let mut verifier_state = domain_separator.to_verifier_state(proof);
+                let statement = CircuitStatement::new(crs, &witness);
+                verifier_state.public_points(&statement.v).unwrap();
+                verifier_state.ratchet().unwrap();
+
+                circuit_verify(&mut verifier_state, crs, &circuit, statement).unwrap();
+                black_box(())
+            })
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_circuit_proofs(c: &mut Criterion) {
+    let circuit_sizes = [(4, 8), (8, 16), (16, 32)];
+
+    // Create CRS
+    let crs: CircuitCRS<Projective> = CircuitCRS::rand(16, &mut OsRng);
+
+    for (n, q) in circuit_sizes {
+        bench_circuit_prove_verify_cycle(c, &crs, n, q);
+    }
+}
+
 fn bench_aggregate_range_proofs(c: &mut Criterion) {
     // Create shared CRS large enough for n_bits=64 and m=512 (64 * 512 = 32768)
     let shared_crs = RangeCRS::rand(64 * 512, &mut OsRng);
@@ -226,6 +314,7 @@ criterion_group!(
     benches,
     bench_ipa_prove_verify_cycle,
     bench_range_proofs,
-    bench_aggregate_range_proofs
+    bench_aggregate_range_proofs,
+    bench_circuit_proofs,
 );
 criterion_main!(benches);

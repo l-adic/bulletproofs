@@ -7,17 +7,20 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::ops::Mul;
+use std::{iter::successors, ops::Mul};
 use tracing::instrument;
 
-use crate::range::{
-    types::{CRS, VectorPolynomial},
-    utils::{bit_decomposition, create_hs_prime, power_sequence},
-};
 use crate::vector_ops::{VectorOps, sum};
 use crate::{
     ipa::{self, extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
     range::types::aggregate::{Statement, Witness},
+};
+use crate::{
+    range::{
+        types::{CRS, VectorPolynomial},
+        utils::{bit_decomposition, create_hs_prime},
+    },
+    vector_ops::inner_product,
 };
 
 #[allow(dead_code)]
@@ -66,7 +69,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let hs = &crs.ipa_crs.hs[0..n_bits * m];
 
     let one_vec = vec![G::ScalarField::one(); n_bits * m];
-    let two_vec = power_sequence(G::ScalarField::from(2u64), n_bits);
+    let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
+        Some(*succ * G::ScalarField::from(2u64))
+    })
+    .take(n_bits)
+    .collect();
 
     let a_l: Vec<G::ScalarField> = {
         let mut res = Vec::with_capacity(n_bits * m);
@@ -87,8 +94,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
-        let scalars: Vec<G::ScalarField> = a_l.iter().copied().chain(a_r.iter().copied()).collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+        let scalars: Vec<G::ScalarField> = a_l.iter().chain(a_r.iter()).copied().collect();
         G::msm_unchecked(&bases, &scalars)
     };
     let s_l: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
@@ -96,19 +103,21 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let rho: G::ScalarField = UniformRand::rand(rng);
     let s = crs.h.mul(rho) + {
-        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
-        let scalars: Vec<G::ScalarField> = s_l.iter().copied().chain(s_r.iter().copied()).collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+        let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
         G::msm_unchecked(&bases, &scalars)
     };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
 
-    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits * m);
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n_bits * m)
+            .collect();
 
     let l_poly = {
         let coeffs = vec![
-            a_l.iter()
-                .copied()
+            a_l.into_iter()
                 .vector_sub(one_vec.iter().copied().scale(z))
                 .collect(),
             s_l.clone(),
@@ -117,33 +126,19 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     };
 
     let r_poly = {
-        let sigma_sum = {
-            let mut res = vec![G::ScalarField::zero(); n_bits * m];
-            let mut z_power = z; // z^1
-            for j in 0..m {
-                z_power *= z; // z^{1+j+1} = z^{2+j}
-                for i in 0..n_bits {
-                    res[j * n_bits + i] = two_vec[i] * z_power;
-                }
-            }
-            res
-        };
         let coeffs = vec![
             y_vec
                 .iter()
                 .copied()
-                .hadamard(
-                    a_r.iter()
-                        .copied()
-                        .vector_add(one_vec.iter().copied().scale(z)),
-                )
-                .vector_add(sigma_sum.iter().copied())
+                .hadamard(a_r.into_iter().vector_add(one_vec.into_iter().scale(z)))
+                .vector_add({
+                    let z_powers = successors(Some(z.square()), |&z_pow| Some(z_pow * z)).take(m);
+                    z_powers
+                        .flat_map(|z_power| std::iter::repeat(z_power).take(n_bits))
+                        .hadamard(two_vec.iter().cycle().take(n_bits * m).copied())
+                })
                 .collect(),
-            y_vec
-                .iter()
-                .copied()
-                .hadamard(s_r.iter().copied())
-                .collect(),
+            y_vec.into_iter().hadamard(s_r.into_iter()).collect(),
         ];
         VectorPolynomial::new(coeffs, n_bits * m)
     };
@@ -164,13 +159,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let tao_x = {
             let sigma_summand = {
-                let mut sum = G::ScalarField::zero();
-                let mut z_power = z; // z^1
-                for j in 0..m {
-                    z_power *= z; // z^{1+j+1} = z^{2+j}
-                    sum += z_power * witness.gamma[j];
-                }
-                sum
+                let z_vec = successors(Some(z.square()), |succ| Some(*succ * z)).take(m);
+                inner_product(z_vec, witness.gamma.iter().copied())
             };
             tao1 * x + tao2 * x.square() + sigma_summand
         };
@@ -201,7 +191,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
 pub fn verify<G: CurveGroup>(
-    mut verifier_state: spongefish::VerifierState,
+    verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<()> {
@@ -214,8 +204,15 @@ pub fn verify<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
 
-    let two_vec = power_sequence(G::ScalarField::from(2u64), n_bits);
-    let y_vec: Vec<G::ScalarField> = power_sequence(y, n_bits * m);
+    let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
+        Some(*succ * G::ScalarField::from(2u64))
+    })
+    .take(n_bits)
+    .collect();
+    let y_vec: Vec<G::ScalarField> =
+        successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
+            .take(n_bits * m)
+            .collect();
 
     {
         let tt1 = tt1.into_affine();
@@ -225,22 +222,18 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let sigma_summand: G::ScalarField = {
                 let d = sum(two_vec.iter().copied());
-                let mut sum = G::ScalarField::zero();
-                let mut z_power = z * z; // z^2
-                for _j in 0..m {
-                    z_power *= z;
-                    sum += z_power * d;
-                }
-                sum
+                let z_vec = successors(Some(z.square() * z), |succ| Some(*succ * z)).take(m);
+                sum(z_vec) * d
             };
 
             let delta_y_z = { (z - z.square()) * sum(y_vec.iter().copied()) - sigma_summand };
 
             let z_vec = {
-                let mut powers = power_sequence(z, m);
-                powers.iter_mut().for_each(|x| *x *= z.square());
-                powers
+                successors(Some(z.square()), |succ| Some(*succ * z))
+                    .take(m)
+                    .collect::<Vec<_>>()
             };
+
             let vs = G::normalize_batch(&statement.v);
 
             crs.g.mul(delta_y_z) + G::msm_unchecked(&vs, &z_vec) + tt1.mul(x) + tt2.mul(x.square())
@@ -256,28 +249,24 @@ pub fn verify<G: CurveGroup>(
         let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
 
         let p: G = {
-            let mut hs_combined_scalars = vec![G::ScalarField::zero(); n_bits * m];
-
-            for i in 0..n_bits * m {
-                hs_combined_scalars[i] = z * y_vec[i];
-            }
-
-            let mut z_power = z; // z^1
-            for j in 0..m {
-                z_power *= z; // z^{2+j}
-                for i in 0..n_bits {
-                    hs_combined_scalars[j * n_bits + i] += two_vec[i] * z_power;
-                }
-            }
-
             let gs_scalars = std::iter::repeat(-z).take(n_bits * m);
+
+            let hs_combined_scalars = {
+                // Base term: z * y_vec[i] for each position i
+                let base_terms = y_vec.iter().copied().scale(z);
+
+                // Sigma term: same pattern as prover's sigma_sum
+                let sigma_terms = successors(Some(z.square()), |&z_pow| Some(z_pow * z))
+                    .take(m)
+                    .flat_map(|z_power| two_vec.iter().copied().scale(z_power));
+
+                base_terms.vector_add(sigma_terms)
+            };
 
             {
                 let bases: Vec<G::Affine> =
                     gs.iter().copied().chain(hs_prime.iter().copied()).collect();
-                let scalars: Vec<G::ScalarField> = gs_scalars
-                    .chain(hs_combined_scalars.iter().copied())
-                    .collect();
+                let scalars: Vec<G::ScalarField> = gs_scalars.chain(hs_combined_scalars).collect();
                 a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
             }
         };
@@ -352,7 +341,7 @@ mod tests_range {
                 .public_points(&statement.v)
                 .expect("cannot add statment");
             verifier_state.ratchet().expect("failed to ratchet");
-            verify(verifier_state, &crs, &statement).expect("proof should verify")
+            verify(&mut verifier_state, &crs, &statement).expect("proof should verify")
         }
     }
 }
