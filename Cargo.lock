@@ -221,6 +221,7 @@ dependencies = [
  "ark-std",
  "criterion",
  "ctor",
+ "nonempty",
  "proptest",
  "rand 0.8.5",
  "rayon",
@@ -631,6 +632,12 @@ name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
+
+[[package]]
+name = "nonempty"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9737e026353e5cd0736f98eddae28665118eb6f6600902a7f50db585621fecb6"
 
 [[package]]
 name = "nu-ansi-term"

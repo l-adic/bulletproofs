@@ -47,7 +47,7 @@ pub fn prove<G: CurveGroup>(
         hs: crs.hs.clone(),
         u: crs.u.mul(x).into_affine(),
     };
-    ipa::prove(prover_state, &crs_mod, &statement, witness)
+    ipa::prove(prover_state, &crs_mod, statement, witness)
 }
 
 pub fn verify<G: CurveGroup>(

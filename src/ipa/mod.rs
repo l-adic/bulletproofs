@@ -1,9 +1,14 @@
 pub mod extended;
 pub mod types;
 
+use crate::{
+    ipa::types::{CRS, Statement, Witness},
+    vector_ops::{VectorOps, inner_product},
+};
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, batch_inversion};
+use ark_ff::{Field, One, UniformRand, batch_inversion};
 use ark_std::log2;
+use nonempty::NonEmpty;
 use rayon::prelude::*;
 use spongefish::{
     DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
@@ -12,13 +17,8 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::ops::Mul;
+use std::{iter::successors, ops::Mul};
 use tracing::instrument;
-
-use crate::{
-    ipa::types::{CRS, Statement, Witness},
-    vector_ops::{VectorOps, inner_product},
-};
 
 pub trait BulletproofDomainSeparator<G: CurveGroup> {
     fn bulletproof_statement(self) -> Self;
@@ -50,13 +50,12 @@ where
 pub fn prove<G: CurveGroup>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
-    statement: &Statement<G>,
+    mut statement: Statement<G>,
     witness: &Witness<G>,
 ) -> ProofResult<Vec<u8>> {
     let mut n = crs.size();
     let mut gs = crs.gs.clone();
     let mut hs = crs.hs.clone();
-    let mut statement = statement.clone();
     let mut witness = witness.clone();
 
     while n != 1 {
@@ -67,8 +66,7 @@ pub fn prove<G: CurveGroup>(
         let (b_left, b_right) = witness.b.split_at(n);
 
         let left = {
-            //let c_left = //slice_ops::dot(a_left, b_right);
-            let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied()); //inner_product(a_left, b_right);
+            let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied());
             crs.u.mul(c_left) + {
                 let bases: Vec<G::Affine> = g_right
                     .iter()
@@ -119,15 +117,46 @@ pub fn prove<G: CurveGroup>(
     Ok(prover_state.narg_string().to_vec())
 }
 
+pub struct ProverMSM<G: CurveGroup> {
+    bases: Vec<G::Affine>,
+    scalars: Vec<G::ScalarField>,
+}
+
+#[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
+pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
+    proofs: NonEmpty<ProverMSM<G>>,
+    rng: &mut Rng,
+) -> ProofResult<()> {
+    let alpha = G::ScalarField::rand(rng);
+    let powers_of_alpha = successors(Some(G::ScalarField::one()), |state| Some(*state * alpha));
+    let bases = proofs
+        .iter()
+        .flat_map(|proof| proof.bases.iter().copied())
+        .collect::<Vec<_>>();
+    let scalars = proofs
+        .into_iter()
+        .zip(powers_of_alpha)
+        .flat_map(|(proof, alpha_i)| {
+            proof
+                .scalars
+                .iter()
+                .map(|s| *s * alpha_i)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    if G::msm_unchecked(&bases, &scalars).is_zero() {
+        Ok(())
+    } else {
+        Err(ProofError::InvalidProof)
+    }
+}
+
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
-pub fn verify<G: CurveGroup>(
+fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<()>
-where
-    G::ScalarField: Field,
-{
+) -> ProofResult<ProverMSM<G>> {
     let n = crs.size();
     let log2_n = log2(n) as usize;
 
@@ -201,23 +230,33 @@ where
         (G::normalize_batch(&bases), scalars)
     };
 
-    let combined = {
-        let bases = lhs
+    let res = ProverMSM {
+        bases: lhs
             .0
             .iter()
             .chain(negative_rhs.0.iter())
             .copied()
-            .collect::<Vec<_>>();
-        let scalars = lhs
+            .collect::<Vec<_>>(),
+        scalars: lhs
             .1
             .iter()
             .chain(negative_rhs.1.iter())
             .copied()
-            .collect::<Vec<_>>();
-        G::msm_unchecked(&bases, &scalars)
+            .collect::<Vec<_>>(),
     };
 
-    if combined.is_zero() {
+    Ok(res)
+}
+
+#[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
+pub fn verify<G: CurveGroup>(
+    verifier_state: &mut VerifierState,
+    crs: &CRS<G>,
+    statement: &Statement<G>,
+) -> ProofResult<()> {
+    let proof = verify_aux(verifier_state, crs, statement)?;
+    let g = G::msm_unchecked(&proof.bases, &proof.scalars);
+    if g.is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -284,7 +323,7 @@ mod tests_proof {
             prover_state.public_points(&[statement.p]).unwrap();
             prover_state.ratchet().unwrap();
 
-            let proof = prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
+            let proof = prove(&mut prover_state, &crs, statement, &witness).expect("proof should be generated");
 
             let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
             fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
@@ -320,5 +359,46 @@ mod tests_proof {
           }
 
       }
+    }
+
+    proptest! {
+      #![proptest_config(Config::with_cases(2))]
+      #[test]
+      fn test_batch_prove_verify_works((crs, witness) in any::<CrsSize>().prop_map(|crs_size| {
+          let mut rng = OsRng;
+          let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
+          let n = crs.size() as u64;
+          let witnesses = (0..4).map(|_| Witness::rand(n, &mut rng)).collect::<Vec<_>>();
+          (crs, witnesses)
+      })) {
+
+        let domain_separator = DomainSeparator::new("test-ipa-batch");
+        let statements = witness.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
+        // prover proves multiple statements
+        let proofs = statements.iter().map(|(witness, statement)| {
+            let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
+            let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size());
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&[statement.p])?;
+            prover_state.ratchet().unwrap();
+            let proof = prove(&mut prover_state, &crs, *statement, witness)?;
+            Ok((statement, proof, domain_separator))
+        }).collect::<Result<Vec<_>, ProofError>>()?;
+
+        let verifications: Vec<ProverMSM<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+            let mut verifier_state = domain_separator.to_verifier_state(proof);
+            verifier_state.public_points(&[statement.p])?;
+            verifier_state.ratchet().unwrap();
+            verify_aux(&mut verifier_state, &crs, statement)
+        }).collect::<Result<Vec<_>, ProofError>>()?;
+
+        let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
+
+        verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
+      }
+
+
+
+
     }
 }

@@ -124,7 +124,7 @@ impl<G: CurveGroup> Add for Witness<G> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Statement<G: CurveGroup> {
     pub p: G,
 }
