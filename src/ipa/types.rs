@@ -58,6 +58,10 @@ impl<G: CurveGroup> Witness<G> {
         Witness { a, b, c }
     }
 
+    pub fn size(&self) -> usize {
+        self.a.len()
+    }
+
     pub fn rand<Rng: rand::Rng>(size: u64, rng: &mut Rng) -> Self {
         let a = (0..size)
             .map(|_| G::ScalarField::rand(rng))
@@ -77,7 +81,10 @@ impl<G: CurveGroup> Witness<G> {
         let g: G = G::msm_unchecked(&crs.gs, &self.a);
         let h: G = G::msm_unchecked(&crs.hs, &self.b);
         let p: G = g.add(&h).add(&crs.u.mul(self.c));
-        Statement { p }
+        Statement {
+            p,
+            witness_size: self.size(),
+        }
     }
 
     pub fn extended_statement(&self, crs: &CRS<G>) -> extended::Statement<G> {
@@ -94,7 +101,11 @@ impl<G: CurveGroup> Witness<G> {
             .chain(self.b.iter().copied())
             .collect();
         let p = G::msm_unchecked(&bases, &scalars);
-        extended::Statement { p, c: self.c() }
+        extended::Statement {
+            p,
+            c: self.c(),
+            witness_size: self.size(),
+        }
     }
 }
 
@@ -127,13 +138,18 @@ impl<G: CurveGroup> Add for Witness<G> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Statement<G: CurveGroup> {
     pub p: G,
+    pub witness_size: usize,
 }
 
 impl<G: CurveGroup> Add for Statement<G> {
     type Output = Statement<G>;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Statement { p: self.p + rhs.p }
+        assert_eq!(self.witness_size, rhs.witness_size);
+        Statement {
+            p: self.p + rhs.p,
+            witness_size: self.witness_size,
+        }
     }
 }
 
@@ -143,6 +159,7 @@ pub mod extended {
     pub struct Statement<G: CurveGroup> {
         pub p: G,
         pub c: G::ScalarField,
+        pub witness_size: usize,
     }
 }
 

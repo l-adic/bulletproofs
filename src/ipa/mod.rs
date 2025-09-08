@@ -53,9 +53,9 @@ pub fn prove<G: CurveGroup>(
     mut statement: Statement<G>,
     witness: &Witness<G>,
 ) -> ProofResult<Vec<u8>> {
-    let mut n = crs.size();
-    let mut gs = crs.gs.clone();
-    let mut hs = crs.hs.clone();
+    let mut n = witness.size();
+    let mut gs: Vec<<G as CurveGroup>::Affine> = crs.gs[0..n].to_vec();
+    let mut hs: Vec<<G as CurveGroup>::Affine> = crs.hs[0..n].to_vec();
     let mut witness = witness.clone();
 
     while n != 1 {
@@ -157,8 +157,10 @@ fn verify_aux<G: CurveGroup>(
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<ProverMSM<G>> {
-    let n = crs.size();
+    let n = statement.witness_size;
     let log2_n = log2(n) as usize;
+    let gs = &crs.gs[0..n];
+    let hs = &crs.hs[0..n];
 
     let transcript: Vec<((G, G), G::ScalarField)> = (0..log2_n)
         .map(|_| {
@@ -199,7 +201,7 @@ fn verify_aux<G: CurveGroup>(
         bases.push(crs.u);
         scalars.push(a * b);
 
-        bases.extend(crs.gs.iter().chain(crs.hs.iter()).copied());
+        bases.extend(gs.iter().chain(hs.iter()).copied());
         scalars.extend(
             ss.iter()
                 .copied()

@@ -37,15 +37,14 @@ fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(80));
 
+    let crs_size = CrsSize { log2_size: 16 };
+    let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size, &mut rng);
     // Test different CRS sizes (log values)
     let sizes = [2_u64, 4, 8, 16];
 
     let mut proofs: HashMap<u64, Vec<u8>> = HashMap::new();
 
     for size in sizes {
-        let crs_size = CrsSize { log2_size: size };
-        let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size, &mut rng);
-
         // Create shared domain separator
         let domain_separator = DomainSeparator::new("ipa-benchmark");
         let domain_separator =

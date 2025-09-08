@@ -41,6 +41,7 @@ pub fn prove<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
+        witness_size: witness.size(),
     };
     let crs_mod = CRS {
         gs: crs.gs.clone(),
@@ -61,6 +62,7 @@ where
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
+        witness_size: ext_statement.witness_size,
     };
     let crs_mod = CRS {
         gs: crs.gs.clone(),
