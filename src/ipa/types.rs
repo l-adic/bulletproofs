@@ -78,8 +78,8 @@ impl<G: CurveGroup> Witness<G> {
     }
 
     pub fn statement(&self, crs: &CRS<G>) -> Statement<G> {
-        let g: G = G::msm_unchecked(&crs.gs, &self.a);
-        let h: G = G::msm_unchecked(&crs.hs, &self.b);
+        let g: G = G::msm_unchecked(&crs.gs[0..self.size()], &self.a);
+        let h: G = G::msm_unchecked(&crs.hs[0..self.size()], &self.b);
         let p: G = g.add(&h).add(&crs.u.mul(self.c));
         Statement {
             p,
@@ -88,11 +88,13 @@ impl<G: CurveGroup> Witness<G> {
     }
 
     pub fn extended_statement(&self, crs: &CRS<G>) -> extended::Statement<G> {
+        let size = self.size();
         let bases: Vec<G::Affine> = crs
             .gs
             .iter()
+            .take(size)
             .copied()
-            .chain(crs.hs.iter().copied())
+            .chain(crs.hs.iter().take(size).copied())
             .collect();
         let scalars: Vec<G::ScalarField> = self
             .a

@@ -316,7 +316,7 @@ mod tests_proof {
               let domain_separator = DomainSeparator::new("test-ipa");
               let domain_separator =
                   BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
-              BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size())
+              BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size())
             };
 
             let mut prover_state = domain_separator.to_prover_state();
@@ -379,7 +379,7 @@ mod tests_proof {
         // prover proves multiple statements
         let proofs = statements.iter().map(|(witness, statement)| {
             let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
-            let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size());
+            let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size());
             let mut prover_state = domain_separator.to_prover_state();
             prover_state.public_points(&[statement.p])?;
             prover_state.ratchet().unwrap();

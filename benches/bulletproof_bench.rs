@@ -31,57 +31,55 @@ use rand::{RngCore, rngs::OsRng};
 use spongefish::DomainSeparator;
 use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
-fn bench_ipa_prove_verify_cycle(c: &mut Criterion) {
-    let mut rng = OsRng;
+fn bench_ipa_prove_verify_cycle(
+    c: &mut Criterion,
+    crs: &IpaCRS<Projective>,
+    witness_size: usize,
+    rng: &mut OsRng,
+) {
     let mut group = c.benchmark_group("ipa");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(80));
 
-    let crs_size = CrsSize { log2_size: 16 };
-    let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size, &mut rng);
-    // Test different CRS sizes (log values)
-    let sizes = [2_u64, 4, 8, 16];
-
     let mut proofs: HashMap<u64, Vec<u8>> = HashMap::new();
+    let size = witness_size as u64;
 
-    for size in sizes {
-        // Create shared domain separator
-        let domain_separator = DomainSeparator::new("ipa-benchmark");
-        let domain_separator =
-            BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator)
-                .ratchet();
-        let domain_separator =
-            BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, crs.size());
+    // Create shared domain separator
+    let domain_separator = DomainSeparator::new("ipa-benchmark");
 
-        let witness = IpaWitness::rand(crs.size() as u64, &mut rng);
-        let stmt = witness.statement(&crs);
+    let witness = IpaWitness::rand(witness_size as u64, rng);
+    let stmt = witness.statement(crs);
 
-        // Benchmark prove
-        group.bench_with_input(BenchmarkId::new("prove", size), &size, |b, _| {
-            b.iter(|| {
-                let mut prover_state = domain_separator.to_prover_state();
-                prover_state.public_points(&[stmt.p]).unwrap();
-                prover_state.ratchet().unwrap();
+    let domain_separator =
+        BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
+    let domain_separator =
+        BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size());
 
-                let proof = ipa_prove(&mut prover_state, &crs, stmt, &witness).unwrap();
-                proofs.insert(size, proof.clone());
-                black_box(proof)
-            })
-        });
+    // Benchmark prove
+    group.bench_with_input(BenchmarkId::new("prove", size), &size, |b, _| {
+        b.iter(|| {
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&[stmt.p]).unwrap();
+            prover_state.ratchet().unwrap();
 
-        // Benchmark verify using the same domain separator and pre-generated proof
-        group.bench_with_input(BenchmarkId::new("verify", size), &size, |b, _| {
-            b.iter(|| {
-                let proof = proofs.get(&size).unwrap();
-                let mut verifier_state = domain_separator.to_verifier_state(proof);
-                verifier_state.public_points(&[stmt.p]).unwrap();
-                verifier_state.ratchet().unwrap();
+            let proof = ipa_prove(&mut prover_state, crs, stmt, &witness).unwrap();
+            proofs.insert(size, proof.clone());
+            black_box(proof)
+        })
+    });
 
-                ipa_verify(&mut verifier_state, &crs, &stmt).unwrap();
-                black_box(())
-            })
-        });
-    }
+    // Benchmark verify using the same domain separator and pre-generated proof
+    group.bench_with_input(BenchmarkId::new("verify", size), &size, |b, _| {
+        b.iter(|| {
+            let proof = proofs.get(&size).unwrap();
+            let mut verifier_state = domain_separator.to_verifier_state(proof);
+            verifier_state.public_points(&[stmt.p]).unwrap();
+            verifier_state.ratchet().unwrap();
+
+            ipa_verify(&mut verifier_state, crs, &stmt).unwrap();
+            black_box(())
+        })
+    });
 
     group.finish();
 }
@@ -203,15 +201,23 @@ fn bench_aggregate_range_prove_verify_cycle(
     group.finish();
 }
 
+fn bench_ipa_proofs(c: &mut Criterion) {
+    let mut rng = OsRng;
+    let crs_size = CrsSize { log2_size: 16 };
+    let crs: IpaCRS<Projective> = IpaCRS::rand(crs_size, &mut rng);
+    for size in [2, 4, 8, 16] {
+        bench_ipa_prove_verify_cycle(c, &crs, size << 1, &mut rng);
+    }
+}
+
 fn bench_range_proofs(c: &mut Criterion) {
     let mut rng = OsRng;
     // Create shared CRS that's large enough for all range proof sizes we want to test
     let shared_crs = RangeCRS::rand(64, &mut rng);
 
-    bench_range_prove_verify_cycle(c, &shared_crs, 8);
-    bench_range_prove_verify_cycle(c, &shared_crs, 16);
-    bench_range_prove_verify_cycle(c, &shared_crs, 32);
-    bench_range_prove_verify_cycle(c, &shared_crs, 64);
+    [8, 16, 32, 64].iter().for_each(|&n_bits| {
+        bench_range_prove_verify_cycle(c, &shared_crs, n_bits);
+    });
 }
 
 fn bench_circuit_prove_verify_cycle(
@@ -287,11 +293,8 @@ fn bench_circuit_prove_verify_cycle(
 }
 
 fn bench_circuit_proofs(c: &mut Criterion) {
-    let circuit_sizes = [(4, 8), (8, 16), (16, 32)];
-
-    // Create CRS
     let crs: CircuitCRS<Projective> = CircuitCRS::rand(16, &mut OsRng);
-
+    let circuit_sizes = [(4, 8), (8, 16), (16, 32)];
     for (n, q) in circuit_sizes {
         bench_circuit_prove_verify_cycle(c, &crs, n, q);
     }
@@ -301,8 +304,6 @@ fn bench_aggregate_range_proofs(c: &mut Criterion) {
     // Create shared CRS large enough for n_bits=64 and m=512 (64 * 512 = 32768)
     let shared_crs = RangeCRS::rand(64 * 512, &mut OsRng);
     let n_bits = 64;
-
-    // Test powers of 2 from 2^1 to 2^9 (2 to 512)
     for i in 1..=9 {
         let m = 1 << i; // 2^i
         bench_aggregate_range_prove_verify_cycle(c, &shared_crs, n_bits, m);
@@ -311,7 +312,7 @@ fn bench_aggregate_range_proofs(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_ipa_prove_verify_cycle,
+    bench_ipa_proofs,
     bench_range_proofs,
     bench_aggregate_range_proofs,
     bench_circuit_proofs,
