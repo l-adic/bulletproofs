@@ -249,28 +249,24 @@ pub fn verify<G: CurveGroup>(
         let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
 
         let p: G = {
-            let mut hs_combined_scalars = vec![G::ScalarField::zero(); n_bits * m];
-
-            for i in 0..n_bits * m {
-                hs_combined_scalars[i] = z * y_vec[i];
-            }
-
-            let mut z_power = z; // z^1
-            for j in 0..m {
-                z_power *= z; // z^{2+j}
-                for i in 0..n_bits {
-                    hs_combined_scalars[j * n_bits + i] += two_vec[i] * z_power;
-                }
-            }
-
             let gs_scalars = std::iter::repeat(-z).take(n_bits * m);
+
+            let hs_combined_scalars = {
+                // Base term: z * y_vec[i] for each position i
+                let base_terms = y_vec.iter().copied().scale(z);
+
+                // Sigma term: same pattern as prover's sigma_sum
+                let sigma_terms = successors(Some(z.square()), |&z_pow| Some(z_pow * z))
+                    .take(m)
+                    .flat_map(|z_power| two_vec.iter().copied().scale(z_power));
+
+                base_terms.vector_add(sigma_terms)
+            };
 
             {
                 let bases: Vec<G::Affine> =
                     gs.iter().copied().chain(hs_prime.iter().copied()).collect();
-                let scalars: Vec<G::ScalarField> = gs_scalars
-                    .chain(hs_combined_scalars.iter().copied())
-                    .collect();
+                let scalars: Vec<G::ScalarField> = gs_scalars.chain(hs_combined_scalars).collect();
                 a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
             }
         };

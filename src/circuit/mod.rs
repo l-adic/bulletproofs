@@ -276,8 +276,6 @@ pub fn verify<G: CurveGroup>(
         inner_product(l, r)
     };
 
-    println!("Verifier delta_y_z = {}", delta_y_z);
-
     {
         let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
 
@@ -306,7 +304,6 @@ pub fn verify<G: CurveGroup>(
         );
         let ww_r = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
-            // let scalars = hadamard(&y_inv_vec, &v).collect::<Vec<_>>();
             let scalars = y_inv_vec.iter().copied().hadamard(v).collect::<Vec<_>>();
             G::msm_unchecked(&crs.ipa_crs.gs, &scalars)
         };
@@ -325,16 +322,12 @@ pub fn verify<G: CurveGroup>(
             + ww_o
             + s.mul(x.pow([3]));
 
-        println!("  verifier p (before -mu) = {:?}", p.into_affine());
         let p_with_mu = p + crs.h.mul(-mu);
-        println!("  verifier p (after -mu) = {:?}", p_with_mu.into_affine());
 
         let extended_statement = ipa_types::extended::Statement {
             p: p_with_mu,
             c: t_hat,
         };
-
-        println!("Verifier extended_statement.c = {:?}", extended_statement.c);
 
         let crs = ipa_types::CRS {
             gs: crs.ipa_crs.gs.to_vec(),
@@ -365,13 +358,10 @@ mod tests {
         ) {
             let mut rng = OsRng;
 
-            // Generate valid circuit and witness using the working method
             let (circuit, witness) = types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
 
-            // Verify circuit is satisfied by witness before proving
             assert!(circuit.is_satisfied_by(&witness), "Circuit not satisfied by witness");
 
-            // CRS size must match circuit dimension
             let crs: types::CRS<Projective> = types::CRS::rand(circuit.dim(), &mut rng);
 
             let domain_separator = {
