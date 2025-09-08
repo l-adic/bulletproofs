@@ -139,7 +139,7 @@ where
         })
         .collect::<ProofResult<Vec<_>>>()?;
 
-    let lhs: G = {
+    let lhs = {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
 
         let ss: Vec<G::ScalarField> = (0..n)
@@ -164,33 +164,60 @@ where
             batch_inversion(&mut ss_inverse);
             ss_inverse
         };
+        let mut bases = Vec::with_capacity(1 + 2 * n);
+        let mut scalars = Vec::with_capacity(1 + 2 * n);
 
-        crs.u.mul(a * b) + {
-            let bases: Vec<G::Affine> = crs
-                .gs
-                .iter()
-                .copied()
-                .chain(crs.hs.iter().copied())
-                .collect();
-            let scalars: Vec<G::ScalarField> = ss
-                .iter()
+        bases.push(crs.u);
+        scalars.push(a * b);
+
+        bases.extend(crs.gs.iter().chain(crs.hs.iter()).copied());
+        scalars.extend(
+            ss.iter()
                 .copied()
                 .scale(a)
-                .chain(ss_inverse.iter().copied().scale(b))
-                .collect();
-            G::msm_unchecked(&bases, &scalars)
-        }
+                .chain(ss_inverse.iter().copied().scale(b)),
+        );
+
+        (bases, scalars)
     };
 
-    let rhs = {
-        transcript
-            .into_iter()
-            .fold(statement.p, |acc, ((left, right), x)| {
-                acc + left * x.square() + right * x.inverse().expect("non-zero inverse").square()
-            })
+    let negative_rhs = {
+        let mut bases: Vec<G> = {
+            let mut v = Vec::with_capacity(log2_n);
+            v.push(statement.p);
+            v
+        };
+        let mut scalars: Vec<G::ScalarField> = {
+            let mut v = Vec::with_capacity(log2_n);
+            v.push(-G::ScalarField::one());
+            v
+        };
+        transcript.into_iter().for_each(|((left, right), x)| {
+            bases.push(left);
+            scalars.push(-(x.square()));
+            bases.push(right);
+            scalars.push(-(x.inverse().expect("non-zero inverse").square()));
+        });
+        (G::normalize_batch(&bases), scalars)
     };
 
-    if (lhs - rhs).is_zero() {
+    let combined = {
+        let bases = lhs
+            .0
+            .iter()
+            .chain(negative_rhs.0.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        let scalars = lhs
+            .1
+            .iter()
+            .chain(negative_rhs.1.iter())
+            .copied()
+            .collect::<Vec<_>>();
+        G::msm_unchecked(&bases, &scalars)
+    };
+
+    if combined.is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
