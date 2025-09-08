@@ -10,14 +10,17 @@ use spongefish::{
 use std::{iter::successors, ops::Mul};
 use tracing::instrument;
 
-use crate::range::{
-    types::{CRS, VectorPolynomial},
-    utils::{bit_decomposition, create_hs_prime},
-};
 use crate::vector_ops::{VectorOps, sum};
 use crate::{
     ipa::{self, extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
     range::types::aggregate::{Statement, Witness},
+};
+use crate::{
+    range::{
+        types::{CRS, VectorPolynomial},
+        utils::{bit_decomposition, create_hs_prime},
+    },
+    vector_ops::inner_product,
 };
 
 #[allow(dead_code)]
@@ -91,8 +94,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let a = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
-        let scalars: Vec<G::ScalarField> = a_l.iter().copied().chain(a_r.iter().copied()).collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+        let scalars: Vec<G::ScalarField> = a_l.iter().chain(a_r.iter()).copied().collect();
         G::msm_unchecked(&bases, &scalars)
     };
     let s_l: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
@@ -100,8 +103,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let rho: G::ScalarField = UniformRand::rand(rng);
     let s = crs.h.mul(rho) + {
-        let bases: Vec<G::Affine> = gs.iter().copied().chain(hs.iter().copied()).collect();
-        let scalars: Vec<G::ScalarField> = s_l.iter().copied().chain(s_r.iter().copied()).collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+        let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
         G::msm_unchecked(&bases, &scalars)
     };
     prover_state.add_points(&[a, s])?;
@@ -114,8 +117,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let l_poly = {
         let coeffs = vec![
-            a_l.iter()
-                .copied()
+            a_l.into_iter()
                 .vector_sub(one_vec.iter().copied().scale(z))
                 .collect(),
             s_l.clone(),
@@ -124,33 +126,19 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     };
 
     let r_poly = {
-        let sigma_sum = {
-            let mut res = vec![G::ScalarField::zero(); n_bits * m];
-            let mut z_power = z; // z^1
-            for j in 0..m {
-                z_power *= z; // z^{1+j+1} = z^{2+j}
-                for i in 0..n_bits {
-                    res[j * n_bits + i] = two_vec[i] * z_power;
-                }
-            }
-            res
-        };
         let coeffs = vec![
             y_vec
                 .iter()
                 .copied()
-                .hadamard(
-                    a_r.iter()
-                        .copied()
-                        .vector_add(one_vec.iter().copied().scale(z)),
-                )
-                .vector_add(sigma_sum.iter().copied())
+                .hadamard(a_r.into_iter().vector_add(one_vec.into_iter().scale(z)))
+                .vector_add({
+                    let z_powers = successors(Some(z.square()), |&z_pow| Some(z_pow * z)).take(m);
+                    z_powers
+                        .flat_map(|z_power| std::iter::repeat(z_power).take(n_bits))
+                        .hadamard(two_vec.iter().cycle().take(n_bits * m).copied())
+                })
                 .collect(),
-            y_vec
-                .iter()
-                .copied()
-                .hadamard(s_r.iter().copied())
-                .collect(),
+            y_vec.into_iter().hadamard(s_r.into_iter()).collect(),
         ];
         VectorPolynomial::new(coeffs, n_bits * m)
     };
@@ -171,13 +159,8 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let tao_x = {
             let sigma_summand = {
-                let mut sum = G::ScalarField::zero();
-                let mut z_power = z; // z^1
-                for j in 0..m {
-                    z_power *= z; // z^{1+j+1} = z^{2+j}
-                    sum += z_power * witness.gamma[j];
-                }
-                sum
+                let z_vec = successors(Some(z.square()), |succ| Some(*succ * z)).take(m);
+                inner_product(z_vec, witness.gamma.iter().copied())
             };
             tao1 * x + tao2 * x.square() + sigma_summand
         };
@@ -239,20 +222,14 @@ pub fn verify<G: CurveGroup>(
         let rhs = {
             let sigma_summand: G::ScalarField = {
                 let d = sum(two_vec.iter().copied());
-                let mut sum = G::ScalarField::zero();
-                let mut z_power = z * z; // z^2
-                for _j in 0..m {
-                    z_power *= z;
-                    sum += z_power * d;
-                }
-                sum
+                let z_vec = successors(Some(z.square() * z), |succ| Some(*succ * z)).take(m);
+                sum(z_vec) * d
             };
 
             let delta_y_z = { (z - z.square()) * sum(y_vec.iter().copied()) - sigma_summand };
 
             let z_vec = {
-                successors(Some(G::ScalarField::one()), |succ| Some(*succ * z))
-                    .scale(z.square())
+                successors(Some(z.square()), |succ| Some(*succ * z))
                     .take(m)
                     .collect::<Vec<_>>()
             };
