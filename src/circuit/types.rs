@@ -185,7 +185,6 @@ impl<Fr> Circuit<Fr> {
         Self::new(w_l, w_r, w_o, w_v, c)
     }
 
-    #[cfg(test)]
     pub fn generate_from_witness<Rng: rand::Rng>(
         q: usize,
         n: usize,
