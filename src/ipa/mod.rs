@@ -17,7 +17,7 @@ use tracing::instrument;
 
 use crate::{
     ipa::types::{CRS, Statement, Witness},
-    vector_ops::inner_product,
+    vector_ops::{VectorOps, inner_product},
 };
 
 pub trait BulletproofDomainSeparator<G: CurveGroup> {
@@ -174,8 +174,9 @@ where
                 .collect();
             let scalars: Vec<G::ScalarField> = ss
                 .iter()
-                .map(|s| *s * a)
-                .chain(ss_inverse.iter().map(|s_inv| *s_inv * b))
+                .copied()
+                .scale(a)
+                .chain(ss_inverse.iter().copied().scale(b))
                 .collect();
             G::msm_unchecked(&bases, &scalars)
         }

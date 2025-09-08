@@ -52,23 +52,19 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     witness: &types::Witness<G::ScalarField>,
     rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
-    let n = crs.size();
+    let n = circuit.dim();
     assert!(
-        n == circuit.dim(),
-        "CRS size and circuit dimension must match"
+        crs.size() >= circuit.dim(),
+        "CRS size must be gte circuit dimension"
     );
+    let gs = &crs.ipa_crs.gs[0..n];
+    let hs = &crs.ipa_crs.hs[0..n];
     let q = circuit.size();
     let [alpha, beta, rho]: [G::ScalarField; 3] =
         std::array::from_fn(|_| G::ScalarField::rand(rng));
 
     let a_i = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = crs
-            .ipa_crs
-            .gs
-            .iter()
-            .chain(crs.ipa_crs.hs.iter())
-            .copied()
-            .collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
         let scalars: Vec<G::ScalarField> = witness
             .a_l
             .iter()
@@ -78,7 +74,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         G::msm_unchecked(&bases, &scalars)
     };
 
-    let a_o = crs.h.mul(beta) + G::msm_unchecked(&crs.ipa_crs.gs, &witness.a_o);
+    let a_o = crs.h.mul(beta) + G::msm_unchecked(gs, &witness.a_o);
 
     let s_l = (0..n)
         .map(|_| G::ScalarField::rand(rng))
@@ -88,13 +84,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         .collect::<Vec<_>>();
 
     let s = crs.h.mul(rho) + {
-        let bases: Vec<G::Affine> = crs
-            .ipa_crs
-            .gs
-            .iter()
-            .chain(crs.ipa_crs.hs.iter())
-            .copied()
-            .collect();
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
         let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
         G::msm_unchecked(&bases, &scalars)
     };
@@ -199,7 +189,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let r = r_poly.evaluate(x);
 
         let witness = ipa_types::Witness::new(l, r);
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n], y);
+        let hs_prime = create_hs_prime::<G>(hs, y);
 
         let mut extended_statement: ipa_types::extended::Statement<G> =
             witness.extended_statement(&crs.ipa_crs);
@@ -209,7 +199,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
 
         let crs = ipa_types::CRS {
-            gs: crs.ipa_crs.gs.to_vec(),
+            gs: gs.to_vec(),
             hs: hs_prime,
             u: crs.ipa_crs.u,
         };
@@ -237,8 +227,10 @@ pub fn verify<G: CurveGroup>(
     circuit: &types::Circuit<G::ScalarField>,
     statement: Statement<G>,
 ) -> ProofResult<()> {
-    let n = crs.size();
+    let n = circuit.dim();
     let q = circuit.size();
+    let gs = &crs.ipa_crs.gs[0..n];
+    let hs = &crs.ipa_crs.hs[0..n];
 
     let [a_i, a_o, s]: [G; 3] = verifier_state.next_points()?;
     let [y, z]: [G::ScalarField; 2] = verifier_state.challenge_scalars()?;
@@ -296,7 +288,7 @@ pub fn verify<G: CurveGroup>(
         assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
     };
     {
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n], y);
+        let hs_prime = create_hs_prime::<G>(hs, y);
 
         let ww_l = G::msm_unchecked(
             &hs_prime,
@@ -305,7 +297,7 @@ pub fn verify<G: CurveGroup>(
         let ww_r = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
             let scalars = y_inv_vec.iter().copied().hadamard(v).collect::<Vec<_>>();
-            G::msm_unchecked(&crs.ipa_crs.gs, &scalars)
+            G::msm_unchecked(gs, &scalars)
         };
         let ww_o = G::msm_unchecked(
             &hs_prime,
@@ -330,7 +322,7 @@ pub fn verify<G: CurveGroup>(
         };
 
         let crs = ipa_types::CRS {
-            gs: crs.ipa_crs.gs.to_vec(),
+            gs: gs.to_vec(),
             hs: hs_prime,
             u: crs.ipa_crs.u,
         };
