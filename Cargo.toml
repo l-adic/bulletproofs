@@ -21,6 +21,19 @@ time = { version = "0.3", features = ["formatting"] }
 ctor = "0.2"
 criterion = { version = "0.5", features = ["html_reports"] }
 
+
 [[bench]]
-name = "bulletproof_bench"
+name = "ipa_bench"
+harness = false
+
+[[bench]]
+name = "range_bench"
+harness = false
+
+[[bench]]
+name = "aggregate_range_bench"
+harness = false
+
+[[bench]]
+name = "circuit_bench"
 harness = false

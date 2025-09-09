@@ -21,12 +21,10 @@ where
     G: CurveGroup,
     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
 {
-    /// The IO of the bulletproof statement
     fn extended_bulletproof_statement(self) -> Self {
         self.bulletproof_statement().add_scalars(1, "dot-product")
     }
 
-    /// The IO of the bulletproof protocol
     fn add_extended_bulletproof(self, len: usize) -> Self {
         self.challenge_scalars(1, "x").add_bulletproof(len)
     }

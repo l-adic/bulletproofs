@@ -2,11 +2,11 @@ pub mod extended;
 pub mod types;
 
 use crate::{
-    ipa::types::{CRS, Statement, Witness},
+    ipa::types::{CRS, Msm, Statement, Witness},
     vector_ops::{VectorOps, inner_product},
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, UniformRand, Zero, batch_inversion};
+use ark_ff::{Field, One, UniformRand, batch_inversion};
 use ark_std::log2;
 use nonempty::NonEmpty;
 use rayon::prelude::*;
@@ -30,12 +30,10 @@ where
     G: CurveGroup,
     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
 {
-    /// The IO of the bulletproof statement
     fn bulletproof_statement(self) -> Self {
         self.add_points(1, "Pedersen commitment")
     }
 
-    /// The IO of the bulletproof protocol
     fn add_bulletproof(mut self, len: usize) -> Self {
         for _ in 0..log2(len) {
             self = self
@@ -65,47 +63,53 @@ pub fn prove<G: CurveGroup>(
         let (a_left, a_right) = witness.a.split_at(n);
         let (b_left, b_right) = witness.b.split_at(n);
 
-        let left = {
-            let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied());
-            crs.u.mul(c_left) + {
-                let bases: Vec<G::Affine> = g_right
-                    .iter()
-                    .copied()
-                    .chain(h_left.iter().copied())
-                    .collect();
-                let scalars: Vec<G::ScalarField> = a_left
-                    .iter()
-                    .copied()
-                    .chain(b_right.iter().copied())
-                    .collect();
-                G::msm_unchecked(&bases, &scalars)
-            }
-        };
-
-        let right = {
-            let c_right = inner_product(a_right.iter().copied(), b_left.iter().copied());
-            crs.u.mul(c_right) + {
-                let bases: Vec<G::Affine> = g_left
-                    .iter()
-                    .copied()
-                    .chain(h_right.iter().copied())
-                    .collect();
-                let scalars: Vec<G::ScalarField> = a_right
-                    .iter()
-                    .copied()
-                    .chain(b_left.iter().copied())
-                    .collect();
-                G::msm_unchecked(&bases, &scalars)
-            }
-        };
+        // Compute left and right in parallel - they are independent
+        let (left, right) = rayon::join(
+            || {
+                let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied());
+                crs.u.mul(c_left) + {
+                    let bases: Vec<G::Affine> = g_right
+                        .iter()
+                        .copied()
+                        .chain(h_left.iter().copied())
+                        .collect();
+                    let scalars: Vec<G::ScalarField> = a_left
+                        .iter()
+                        .copied()
+                        .chain(b_right.iter().copied())
+                        .collect();
+                    G::msm_unchecked(&bases, &scalars)
+                }
+            },
+            || {
+                let c_right = inner_product(a_right.iter().copied(), b_left.iter().copied());
+                crs.u.mul(c_right) + {
+                    let bases: Vec<G::Affine> = g_left
+                        .iter()
+                        .copied()
+                        .chain(h_right.iter().copied())
+                        .collect();
+                    let scalars: Vec<G::ScalarField> = a_right
+                        .iter()
+                        .copied()
+                        .chain(b_left.iter().copied())
+                        .collect();
+                    G::msm_unchecked(&bases, &scalars)
+                }
+            },
+        );
 
         prover_state.add_points(&[left, right])?;
 
         let [alpha]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
         let alpha_inv = alpha.inverse().expect("non-zero alpha");
 
-        gs = fold_generators::<G>(g_left, g_right, alpha_inv, alpha);
-        hs = fold_generators::<G>(h_left, h_right, alpha, alpha_inv);
+        let (new_gs, new_hs) = rayon::join(
+            || fold_generators::<G>(g_left, g_right, alpha_inv, alpha),
+            || fold_generators::<G>(h_left, h_right, alpha, alpha_inv),
+        );
+        gs = new_gs;
+        hs = new_hs;
 
         witness.a = fold_scalars(a_left, a_right, alpha, alpha_inv);
         witness.b = fold_scalars(b_left, b_right, alpha_inv, alpha);
@@ -117,98 +121,10 @@ pub fn prove<G: CurveGroup>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-pub struct ProverMSM<G: CurveGroup> {
-    u_scalar: G::ScalarField,
-    gs_scalars: Vec<G::ScalarField>,
-    hs_scalars: Vec<G::ScalarField>,
-    rhs_bases: Vec<G::Affine>,
-    rhs_scalars: Vec<G::ScalarField>,
-    n: usize,
-}
-
-impl<G: CurveGroup> ProverMSM<G> {
-    fn scale(self: ProverMSM<G>, scalar: G::ScalarField) -> Self {
-        ProverMSM::<G> {
-            u_scalar: self.u_scalar * scalar,
-            gs_scalars: self.gs_scalars.iter().copied().scale(scalar).collect(),
-            hs_scalars: self.hs_scalars.iter().copied().scale(scalar).collect(),
-            rhs_bases: self.rhs_bases,
-            rhs_scalars: self.rhs_scalars.iter().copied().scale(scalar).collect(),
-            n: self.n,
-        }
-    }
-
-    pub fn batch(self: ProverMSM<G>, rhs: ProverMSM<G>) -> Self {
-        assert!(
-            self.n == rhs.n,
-            "cannot batch proofs with different witness sizes"
-        );
-        ProverMSM::<G> {
-            u_scalar: self.u_scalar + rhs.u_scalar,
-            gs_scalars: self
-                .gs_scalars
-                .iter()
-                .copied()
-                .vector_add(rhs.gs_scalars.iter().copied())
-                .collect(),
-            hs_scalars: self
-                .hs_scalars
-                .iter()
-                .copied()
-                .vector_add(rhs.hs_scalars.iter().copied())
-                .collect(),
-            rhs_bases: self
-                .rhs_bases
-                .iter()
-                .chain(rhs.rhs_bases.iter())
-                .copied()
-                .collect(),
-            rhs_scalars: self
-                .rhs_scalars
-                .iter()
-                .chain(rhs.rhs_scalars.iter())
-                .copied()
-                .collect(),
-            n: self.n,
-        }
-    }
-
-    pub fn bases(&self, crs: &CRS<G>) -> Vec<G::Affine> {
-        let mut bases: Vec<G::Affine> = {
-            let mut v = Vec::with_capacity(2 * self.n);
-            v.push(crs.u);
-            v.extend_from_slice(&crs.gs[0..self.n]);
-            v.extend_from_slice(&crs.hs[0..self.n]);
-            v
-        };
-        bases.extend_from_slice(&self.rhs_bases);
-        bases
-    }
-
-    pub fn scalars(&self) -> Vec<G::ScalarField> {
-        let mut scalars: Vec<G::ScalarField> = {
-            let mut v = Vec::with_capacity(2 * self.n);
-            v.push(self.u_scalar);
-            v.extend_from_slice(&self.gs_scalars);
-            v.extend_from_slice(&self.hs_scalars);
-            v
-        };
-        scalars.extend_from_slice(
-            &self
-                .rhs_scalars
-                .iter()
-                .copied()
-                .scale(-G::ScalarField::one())
-                .collect::<Vec<_>>(),
-        );
-        scalars
-    }
-}
-
 #[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
 pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
     crs: &CRS<G>,
-    proofs: NonEmpty<ProverMSM<G>>,
+    proofs: NonEmpty<Msm<G>>,
     rng: &mut Rng,
 ) -> ProofResult<()> {
     let alpha = G::ScalarField::rand(rng);
@@ -216,11 +132,16 @@ pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
     let combined_proof = proofs
         .into_iter()
         .zip(powers_of_alpha)
-        .map(|(proof, scalar)| proof.scale(scalar))
-        .reduce(|acc, proof| acc.batch(proof))
+        .map(|(mut proof, scalar)| {
+            proof.scale(scalar);
+            proof
+        })
+        .reduce(|mut acc, proof| {
+            acc.batch(proof);
+            acc
+        })
         .expect("non-empty vec");
-
-    if G::msm_unchecked(&combined_proof.bases(&crs), &combined_proof.scalars()).is_zero() {
+    if G::msm_unchecked(&combined_proof.bases(crs), &combined_proof.scalars()).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -232,7 +153,7 @@ pub fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<ProverMSM<G>> {
+) -> ProofResult<Msm<G>> {
     let n = statement.witness_size;
     let log2_n = log2(n) as usize;
 
@@ -247,22 +168,28 @@ pub fn verify_aux<G: CurveGroup>(
     let (u_scalar, gs_scalars, hs_scalars) = {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
 
+        let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|(_, x)| *x).collect();
+        let challenge_inverses = {
+            let mut inverses = challenge_powers.clone();
+            batch_inversion(&mut inverses);
+            inverses
+        };
+
         let ss: Vec<G::ScalarField> = (0..n)
+            .into_par_iter()
             .map(|i| {
                 (0..log2_n)
                     .map(|j| {
+                        let idx = log2_n - j - 1;
                         if (i >> j) & 1 == 1 {
-                            transcript[log2_n - j - 1].1
+                            challenge_powers[idx]
                         } else {
-                            transcript[log2_n - j - 1]
-                                .1
-                                .inverse()
-                                .expect("non-zero inverse")
+                            challenge_inverses[idx]
                         }
                     })
-                    .fold(G::ScalarField::one(), |acc, x| acc * x)
+                    .product()
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         let ss_inverse = {
             let mut ss_inverse = ss.clone();
@@ -278,12 +205,12 @@ pub fn verify_aux<G: CurveGroup>(
 
     let (rhs_bases, rhs_scalars) = {
         let mut bases: Vec<G> = {
-            let mut v = Vec::with_capacity(log2_n);
+            let mut v = Vec::with_capacity(2 * log2_n + 1);
             v.push(statement.p);
             v
         };
         let mut scalars: Vec<G::ScalarField> = {
-            let mut v = Vec::with_capacity(log2_n);
+            let mut v = Vec::with_capacity(2 * log2_n + 1);
             v.push(G::ScalarField::one());
             v
         };
@@ -296,7 +223,7 @@ pub fn verify_aux<G: CurveGroup>(
         (G::normalize_batch(&bases), scalars)
     };
 
-    let res = ProverMSM {
+    let res = Msm {
         u_scalar,
         gs_scalars,
         hs_scalars,
@@ -304,21 +231,6 @@ pub fn verify_aux<G: CurveGroup>(
         rhs_scalars,
         n,
     };
-
-    /*
-           bases: lhs
-               .0
-               .iter()
-               .chain(negative_rhs.0.iter())
-               .copied()
-               .collect::<Vec<_>>(),
-           scalars: lhs
-               .1
-               .iter()
-               .chain(negative_rhs.1.iter())
-               .copied()
-               .collect::<Vec<_>>(),
-    */
 
     Ok(res)
 }
@@ -340,7 +252,7 @@ pub fn verify<G: CurveGroup>(
 }
 
 #[instrument(skip_all, fields(size = left.len()), level = "debug")]
-pub(super) fn fold_generators<G: CurveGroup>(
+fn fold_generators<G: CurveGroup>(
     left: &[G::Affine],
     right: &[G::Affine],
     x: G::ScalarField,
@@ -354,7 +266,7 @@ pub(super) fn fold_generators<G: CurveGroup>(
     G::normalize_batch(&gs)
 }
 
-pub(super) fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
+fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
     left.par_iter()
         .zip(right)
         .map(|(l, r)| *l * x + *r * y)
@@ -452,7 +364,7 @@ mod tests_proof {
         let domain_separator = DomainSeparator::new("test-ipa-batch");
         let statements = witness.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
 
-        let proofs = statements.iter().map(|(witness, statement)| {
+        let proofs = statements.par_iter().map(|(witness, statement)| {
             let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
             let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size());
             let mut prover_state = domain_separator.to_prover_state();
@@ -462,7 +374,7 @@ mod tests_proof {
             Ok((statement, proof, domain_separator))
         }).collect::<Result<Vec<_>, ProofError>>()?;
 
-        let verifications: Vec<ProverMSM<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.p])?;
             verifier_state.ratchet().unwrap();
@@ -473,9 +385,5 @@ mod tests_proof {
 
         verify_batch_aux(&crs, verifications, &mut OsRng).expect("should verify batch");
       }
-
-
-
-
     }
 }
