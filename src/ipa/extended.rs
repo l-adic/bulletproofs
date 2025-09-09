@@ -6,9 +6,12 @@ use spongefish::{
 };
 use std::ops::Mul;
 
-use crate::ipa::{
-    self as ipa, BulletproofDomainSeparator,
-    types::{self as ipa_types, CRS, Statement, Witness},
+use crate::{
+    ipa::{
+        self as ipa, BulletproofDomainSeparator,
+        types::{self as ipa_types, CRS, Statement, Witness},
+    },
+    msm::Msm,
 };
 
 pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
@@ -58,8 +61,7 @@ where
     G::ScalarField: Field,
 {
     let msm = verify_aux(verifier_state, crs, ext_statement)?;
-    let (bases, scalars) = msm.bases_and_scalars();
-    let g = G::msm_unchecked(&bases, &scalars);
+    let g = msm.execute();
     if g.is_zero() {
         Ok(())
     } else {
@@ -71,7 +73,7 @@ pub fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
-) -> ProofResult<ipa_types::Msm<G>> {
+) -> ProofResult<Msm<G>> {
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),

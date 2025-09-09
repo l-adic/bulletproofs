@@ -1,10 +1,13 @@
 mod common;
 
 use ark_secp256k1::{Fr, Projective};
-use bulletproofs::range::{
-    RangeProofDomainSeparator, prove as range_prove,
-    types::{CRS as RangeCRS, Statement as RangeStatement, Witness as RangeWitness},
-    verify as range_verify, verify_aux, verify_batch_aux,
+use bulletproofs::{
+    msm::verify_batch_aux,
+    range::{
+        RangeProofDomainSeparator, prove as range_prove,
+        types::{CRS as RangeCRS, Statement as RangeStatement, Witness as RangeWitness},
+        verify as range_verify, verify_aux,
+    },
 };
 use common::BoundedProofQueue;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

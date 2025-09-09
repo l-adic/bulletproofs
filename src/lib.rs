@@ -1,5 +1,6 @@
 pub mod circuit;
 pub mod ipa;
+pub mod msm;
 pub mod range;
 mod vector_ops;
 

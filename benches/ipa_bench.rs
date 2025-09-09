@@ -1,10 +1,13 @@
 pub mod common;
 
 use ark_secp256k1::Projective;
-use bulletproofs::ipa::{
-    BulletproofDomainSeparator, prove as ipa_prove,
-    types::{CRS as IpaCRS, CrsSize, Statement as IpaStatement, Witness as IpaWitness},
-    verify as ipa_verify, verify_aux, verify_batch_aux,
+use bulletproofs::{
+    ipa::{
+        BulletproofDomainSeparator, prove as ipa_prove,
+        types::{CRS as IpaCRS, CrsSize, Statement as IpaStatement, Witness as IpaWitness},
+        verify as ipa_verify, verify_aux,
+    },
+    msm::verify_batch_aux,
 };
 use common::BoundedProofQueue;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
