@@ -6,7 +6,7 @@ use crate::{
     vector_ops::{VectorOps, inner_product},
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, UniformRand, batch_inversion};
+use ark_ff::{Field, One, UniformRand, Zero, batch_inversion};
 use ark_std::log2;
 use nonempty::NonEmpty;
 use rayon::prelude::*;
@@ -118,33 +118,109 @@ pub fn prove<G: CurveGroup>(
 }
 
 pub struct ProverMSM<G: CurveGroup> {
-    bases: Vec<G::Affine>,
-    scalars: Vec<G::ScalarField>,
+    u_scalar: G::ScalarField,
+    gs_scalars: Vec<G::ScalarField>,
+    hs_scalars: Vec<G::ScalarField>,
+    rhs_bases: Vec<G::Affine>,
+    rhs_scalars: Vec<G::ScalarField>,
+    n: usize,
+}
+
+impl<G: CurveGroup> ProverMSM<G> {
+    fn scale(self: ProverMSM<G>, scalar: G::ScalarField) -> Self {
+        ProverMSM::<G> {
+            u_scalar: self.u_scalar * scalar,
+            gs_scalars: self.gs_scalars.iter().copied().scale(scalar).collect(),
+            hs_scalars: self.hs_scalars.iter().copied().scale(scalar).collect(),
+            rhs_bases: self.rhs_bases,
+            rhs_scalars: self.rhs_scalars.iter().copied().scale(scalar).collect(),
+            n: self.n,
+        }
+    }
+
+    pub fn batch(self: ProverMSM<G>, rhs: ProverMSM<G>) -> Self {
+        assert!(
+            self.n == rhs.n,
+            "cannot batch proofs with different witness sizes"
+        );
+        ProverMSM::<G> {
+            u_scalar: self.u_scalar + rhs.u_scalar,
+            gs_scalars: self
+                .gs_scalars
+                .iter()
+                .copied()
+                .vector_add(rhs.gs_scalars.iter().copied())
+                .collect(),
+            hs_scalars: self
+                .hs_scalars
+                .iter()
+                .copied()
+                .vector_add(rhs.hs_scalars.iter().copied())
+                .collect(),
+            rhs_bases: self
+                .rhs_bases
+                .iter()
+                .chain(rhs.rhs_bases.iter())
+                .copied()
+                .collect(),
+            rhs_scalars: self
+                .rhs_scalars
+                .iter()
+                .chain(rhs.rhs_scalars.iter())
+                .copied()
+                .collect(),
+            n: self.n,
+        }
+    }
+
+    pub fn bases(&self, crs: &CRS<G>) -> Vec<G::Affine> {
+        let mut bases: Vec<G::Affine> = {
+            let mut v = Vec::with_capacity(2 * self.n);
+            v.push(crs.u);
+            v.extend_from_slice(&crs.gs[0..self.n]);
+            v.extend_from_slice(&crs.hs[0..self.n]);
+            v
+        };
+        bases.extend_from_slice(&self.rhs_bases);
+        bases
+    }
+
+    pub fn scalars(&self) -> Vec<G::ScalarField> {
+        let mut scalars: Vec<G::ScalarField> = {
+            let mut v = Vec::with_capacity(2 * self.n);
+            v.push(self.u_scalar);
+            v.extend_from_slice(&self.gs_scalars);
+            v.extend_from_slice(&self.hs_scalars);
+            v
+        };
+        scalars.extend_from_slice(
+            &self
+                .rhs_scalars
+                .iter()
+                .copied()
+                .scale(-G::ScalarField::one())
+                .collect::<Vec<_>>(),
+        );
+        scalars
+    }
 }
 
 #[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
 pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
+    crs: &CRS<G>,
     proofs: NonEmpty<ProverMSM<G>>,
     rng: &mut Rng,
 ) -> ProofResult<()> {
     let alpha = G::ScalarField::rand(rng);
     let powers_of_alpha = successors(Some(G::ScalarField::one()), |state| Some(*state * alpha));
-    let bases = proofs
-        .iter()
-        .flat_map(|proof| proof.bases.iter().copied())
-        .collect::<Vec<_>>();
-    let scalars = proofs
+    let combined_proof = proofs
         .into_iter()
         .zip(powers_of_alpha)
-        .flat_map(|(proof, alpha_i)| {
-            proof
-                .scalars
-                .iter()
-                .map(|s| *s * alpha_i)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    if G::msm_unchecked(&bases, &scalars).is_zero() {
+        .map(|(proof, scalar)| proof.scale(scalar))
+        .reduce(|acc, proof| acc.batch(proof))
+        .expect("non-empty vec");
+
+    if G::msm_unchecked(&combined_proof.bases(&crs), &combined_proof.scalars()).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -152,17 +228,15 @@ pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
-fn verify_aux<G: CurveGroup>(
+pub fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<ProverMSM<G>> {
     let n = statement.witness_size;
     let log2_n = log2(n) as usize;
-    let gs = &crs.gs[0..n];
-    let hs = &crs.hs[0..n];
 
-    let transcript: Vec<((G, G), G::ScalarField)> = (0..log2_n)
+    let transcript = (0..log2_n)
         .map(|_| {
             let [left, right]: [G; 2] = verifier_state.next_points()?;
             let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
@@ -170,7 +244,7 @@ fn verify_aux<G: CurveGroup>(
         })
         .collect::<ProofResult<Vec<_>>>()?;
 
-    let lhs = {
+    let (u_scalar, gs_scalars, hs_scalars) = {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
 
         let ss: Vec<G::ScalarField> = (0..n)
@@ -195,24 +269,14 @@ fn verify_aux<G: CurveGroup>(
             batch_inversion(&mut ss_inverse);
             ss_inverse
         };
-        let mut bases = Vec::with_capacity(1 + 2 * n);
-        let mut scalars = Vec::with_capacity(1 + 2 * n);
-
-        bases.push(crs.u);
-        scalars.push(a * b);
-
-        bases.extend(gs.iter().chain(hs.iter()).copied());
-        scalars.extend(
-            ss.iter()
-                .copied()
-                .scale(a)
-                .chain(ss_inverse.iter().copied().scale(b)),
-        );
-
-        (bases, scalars)
+        (
+            (a * b),
+            ss.iter().copied().scale(a).collect(),
+            ss_inverse.iter().copied().scale(b).collect(),
+        )
     };
 
-    let negative_rhs = {
+    let (rhs_bases, rhs_scalars) = {
         let mut bases: Vec<G> = {
             let mut v = Vec::with_capacity(log2_n);
             v.push(statement.p);
@@ -220,32 +284,41 @@ fn verify_aux<G: CurveGroup>(
         };
         let mut scalars: Vec<G::ScalarField> = {
             let mut v = Vec::with_capacity(log2_n);
-            v.push(-G::ScalarField::one());
+            v.push(G::ScalarField::one());
             v
         };
         transcript.into_iter().for_each(|((left, right), x)| {
             bases.push(left);
-            scalars.push(-(x.square()));
+            scalars.push(x.square());
             bases.push(right);
-            scalars.push(-(x.inverse().expect("non-zero inverse").square()));
+            scalars.push(x.inverse().expect("non-zero inverse").square());
         });
         (G::normalize_batch(&bases), scalars)
     };
 
     let res = ProverMSM {
-        bases: lhs
-            .0
-            .iter()
-            .chain(negative_rhs.0.iter())
-            .copied()
-            .collect::<Vec<_>>(),
-        scalars: lhs
-            .1
-            .iter()
-            .chain(negative_rhs.1.iter())
-            .copied()
-            .collect::<Vec<_>>(),
+        u_scalar,
+        gs_scalars,
+        hs_scalars,
+        rhs_bases,
+        rhs_scalars,
+        n,
     };
+
+    /*
+           bases: lhs
+               .0
+               .iter()
+               .chain(negative_rhs.0.iter())
+               .copied()
+               .collect::<Vec<_>>(),
+           scalars: lhs
+               .1
+               .iter()
+               .chain(negative_rhs.1.iter())
+               .copied()
+               .collect::<Vec<_>>(),
+    */
 
     Ok(res)
 }
@@ -257,7 +330,8 @@ pub fn verify<G: CurveGroup>(
     statement: &Statement<G>,
 ) -> ProofResult<()> {
     let proof = verify_aux(verifier_state, crs, statement)?;
-    let g = G::msm_unchecked(&proof.bases, &proof.scalars);
+    let (bases, scalars) = (proof.bases(crs), proof.scalars());
+    let g = G::msm_unchecked(&bases, &scalars);
     if g.is_zero() {
         Ok(())
     } else {
@@ -297,7 +371,6 @@ mod tests_proof {
     use rand::rngs::OsRng;
     use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
-    use tracing::info;
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]
@@ -309,56 +382,58 @@ mod tests_proof {
           let witness: Witness<Projective> = Witness::rand(n, &mut rng);
           (crs, witness)
       })) {
+            {
+              let domain_separator = {
+                let domain_separator = DomainSeparator::new("test-ipa");
+                let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
+                BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size())
+              };
 
-          info!("Testing prove/verify with protocol (3)");
-          {
-            let domain_separator = {
-              let domain_separator = DomainSeparator::new("test-ipa");
-              let domain_separator =
-                  BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
-              BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size())
-            };
+              let (statement, proof) = {
+                let mut prover_state = domain_separator.to_prover_state();
+                let statement = witness.statement(&crs);
+                prover_state.public_points(&[statement.p]).unwrap();
+                prover_state.ratchet().unwrap();
+                let proof = prove(&mut prover_state, &crs, statement, &witness).expect("proof should be generated");
+                (statement, proof)
+              };
 
-            let mut prover_state = domain_separator.to_prover_state();
+              let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
+              fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
+              fast_verifier_state.ratchet().expect("failed to ratchet");
+              verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
+            }
 
-            let statement = witness.statement(&crs);
-            prover_state.public_points(&[statement.p]).unwrap();
-            prover_state.ratchet().unwrap();
+            {
 
-            let proof = prove(&mut prover_state, &crs, statement, &witness).expect("proof should be generated");
+              let domain_separator = {
+                let domain_separator = DomainSeparator::new("test-ipa");
+                // add the IO of the bulletproof statement
+                let domain_separator =
+                    ExtendedBulletproofDomainSeparator::<Projective>::extended_bulletproof_statement(domain_separator).ratchet();
+                // add the IO of the bulletproof protocol (the transcript)
+                ExtendedBulletproofDomainSeparator::<Projective>::add_extended_bulletproof(domain_separator, witness.size())
+              };
 
-            let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
-            fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-            fast_verifier_state.ratchet().expect("failed to ratchet");
-            verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
-          }
+              let (statement, proof) = {
 
-          info!("Testing prove/verify with protocol (2)");
-          {
+                let statement: ipa_types::extended::Statement<Projective> = witness.extended_statement(&crs);
+                let mut prover_state = domain_separator.to_prover_state();
+                prover_state.public_points(&[statement.p]).unwrap();
+                prover_state.public_scalars(&[statement.c]).unwrap();
+                prover_state.ratchet().unwrap();
+                let proof = extended::prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
+                (statement, proof)
+              };
 
-            let domain_separator = {
-              let domain_separator = DomainSeparator::new("test-ipa");
-              // add the IO of the bulletproof statement
-              let domain_separator =
-                  ExtendedBulletproofDomainSeparator::<Projective>::extended_bulletproof_statement(domain_separator).ratchet();
-              // add the IO of the bulletproof protocol (the transcript)
-              ExtendedBulletproofDomainSeparator::<Projective>::add_extended_bulletproof(domain_separator, crs.size())
-            };
 
-            let statement: ipa_types::extended::Statement<Projective> = witness.extended_statement(&crs);
-            let mut prover_state = domain_separator.to_prover_state();
-            prover_state.public_points(&[statement.p]).unwrap();
-            prover_state.public_scalars(&[statement.c]).unwrap();
-            prover_state.ratchet().unwrap();
-            let proof = extended::prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
+              let mut verifier_state = domain_separator.to_verifier_state(&proof);
+              verifier_state.public_points(&[statement.p]).expect("cannot add statment");
+              verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
+              verifier_state.ratchet().expect("failed to ratchet");
+              extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
 
-            let mut verifier_state = domain_separator.to_verifier_state(&proof);
-            verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-            verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
-            verifier_state.ratchet().expect("failed to ratchet");
-            extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
-
-          }
+            }
 
       }
     }
@@ -376,7 +451,7 @@ mod tests_proof {
 
         let domain_separator = DomainSeparator::new("test-ipa-batch");
         let statements = witness.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
-        // prover proves multiple statements
+
         let proofs = statements.iter().map(|(witness, statement)| {
             let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
             let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size());
@@ -396,7 +471,7 @@ mod tests_proof {
 
         let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
 
-        verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
+        verify_batch_aux(&crs, verifications, &mut OsRng).expect("should verify batch");
       }
 
 
