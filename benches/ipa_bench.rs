@@ -106,7 +106,7 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
                     .unwrap();
 
                 let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
-                verify_batch_aux(crs, verifications, &mut OsRng).expect("should verify batch");
+                verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
                 black_box(())
             })
         },

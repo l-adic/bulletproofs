@@ -1,7 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::Field;
 use spongefish::{
-    DomainSeparator, ProofResult, ProverState, VerifierState,
+    DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
     codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, UnitToField},
 };
 use std::ops::Mul;
@@ -57,6 +57,21 @@ pub fn verify<G: CurveGroup>(
 where
     G::ScalarField: Field,
 {
+    let msm = verify_aux(verifier_state, crs, ext_statement)?;
+    let (bases, scalars) = msm.bases_and_scalars();
+    let g = G::msm_unchecked(&bases, &scalars);
+    if g.is_zero() {
+        Ok(())
+    } else {
+        Err(ProofError::InvalidProof)
+    }
+}
+
+pub fn verify_aux<G: CurveGroup>(
+    verifier_state: &mut VerifierState,
+    crs: &CRS<G>,
+    ext_statement: &ipa_types::extended::Statement<G>,
+) -> ProofResult<ipa_types::Msm<G>> {
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
@@ -67,5 +82,7 @@ where
         hs: crs.hs.clone(),
         u: crs.u.mul(x).into_affine(),
     };
-    ipa::verify(verifier_state, &crs_mod, &statement)
+    let mut msm = ipa::verify_aux(verifier_state, &crs_mod, &statement)?;
+    msm.msm.entry(crs.u).and_modify(|s| *s *= x);
+    Ok(msm)
 }
