@@ -3,7 +3,7 @@ use ark_ff::UniformRand;
 use proptest::prelude::*;
 use rand::rngs::OsRng;
 use std::{
-    iter::once,
+    collections::HashMap,
     ops::{Add, Mul},
 };
 
@@ -159,58 +159,52 @@ impl<G: CurveGroup> Add for Statement<G> {
 }
 
 pub struct Msm<G: CurveGroup> {
-    pub(super) u_scalar: G::ScalarField,
-    pub(super) gs_scalars: Vec<G::ScalarField>,
-    pub(super) hs_scalars: Vec<G::ScalarField>,
-    pub(super) rhs_bases: Vec<G::Affine>,
-    pub(super) rhs_scalars: Vec<G::ScalarField>,
+    pub msm: HashMap<G::Affine, G::ScalarField>,
     pub(super) n: usize,
 }
 
 impl<G: CurveGroup> Msm<G> {
-    pub(super) fn scale(&mut self, scalar: G::ScalarField) {
-        self.u_scalar *= scalar;
-        self.gs_scalars.iter_mut().for_each(|s| *s *= scalar);
-        self.hs_scalars.iter_mut().for_each(|s| *s *= scalar);
-        self.rhs_scalars.iter_mut().for_each(|s| *s *= scalar);
+    pub fn new(n: usize) -> Self {
+        Msm {
+            msm: HashMap::new(),
+            n,
+        }
     }
 
-    pub(super) fn batch(&mut self, rhs: Msm<G>) {
+    pub fn upsert(&mut self, base: G::Affine, scalar: G::ScalarField) {
+        self.msm
+            .entry(base)
+            .and_modify(|s| *s += scalar)
+            .or_insert(scalar);
+    }
+
+    pub fn upsert_batch(&mut self, bases: &[G::Affine], scalars: &[G::ScalarField]) {
+        assert_eq!(bases.len(), scalars.len());
+        for (base, scalar) in bases.iter().zip(scalars.iter()) {
+            self.upsert(*base, *scalar);
+        }
+    }
+
+    pub(crate) fn scale(&mut self, scalar: G::ScalarField) {
+        for value in self.msm.values_mut() {
+            *value *= scalar;
+        }
+    }
+
+    pub(crate) fn batch(&mut self, rhs: Msm<G>) {
         assert!(
             self.n == rhs.n,
             "cannot batch proofs with different witness sizes"
         );
 
-        self.u_scalar += rhs.u_scalar;
-
-        self.gs_scalars
-            .iter_mut()
-            .zip(rhs.gs_scalars.iter())
-            .for_each(|(a, b)| *a += *b);
-
-        self.hs_scalars
-            .iter_mut()
-            .zip(rhs.hs_scalars.iter())
-            .for_each(|(a, b)| *a += *b);
-
-        self.rhs_bases.extend(rhs.rhs_bases);
-        self.rhs_scalars.extend(rhs.rhs_scalars);
+        for (base, scalar) in rhs.msm {
+            self.upsert(base, scalar);
+        }
     }
 
-    pub(super) fn bases(&self, crs: &CRS<G>) -> Vec<G::Affine> {
-        once(crs.u)
-            .chain(crs.gs[0..self.n].iter().copied())
-            .chain(crs.hs[0..self.n].iter().copied())
-            .chain(self.rhs_bases.iter().copied())
-            .collect()
-    }
-
-    pub(super) fn scalars(&self) -> Vec<G::ScalarField> {
-        once(self.u_scalar)
-            .chain(self.gs_scalars.iter().copied())
-            .chain(self.hs_scalars.iter().copied())
-            .chain(self.rhs_scalars.iter().map(|x| -*x))
-            .collect()
+    pub(crate) fn bases_and_scalars(self) -> (Vec<G::Affine>, Vec<G::ScalarField>) {
+        let (bases, scalars): (Vec<_>, Vec<_>) = self.msm.into_iter().unzip();
+        (bases, scalars)
     }
 }
 
@@ -221,6 +215,11 @@ pub mod extended {
         pub p: G,
         pub c: G::ScalarField,
         pub witness_size: usize,
+    }
+
+    pub struct Msm<G: CurveGroup> {
+        pub bases: Vec<G::Affine>,
+        pub scalars: Vec<G::ScalarField>,
     }
 }
 

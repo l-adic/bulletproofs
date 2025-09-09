@@ -63,7 +63,6 @@ pub fn prove<G: CurveGroup>(
         let (a_left, a_right) = witness.a.split_at(n);
         let (b_left, b_right) = witness.b.split_at(n);
 
-        // Compute left and right in parallel - they are independent
         let (left, right) = rayon::join(
             || {
                 let c_left = inner_product(a_left.iter().copied(), b_right.iter().copied());
@@ -123,7 +122,6 @@ pub fn prove<G: CurveGroup>(
 
 #[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
 pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
-    crs: &CRS<G>,
     proofs: NonEmpty<Msm<G>>,
     rng: &mut Rng,
 ) -> ProofResult<()> {
@@ -141,7 +139,8 @@ pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
             acc
         })
         .expect("non-empty vec");
-    if G::msm_unchecked(&combined_proof.bases(crs), &combined_proof.scalars()).is_zero() {
+    let (bases, scalars) = combined_proof.bases_and_scalars();
+    if G::msm_unchecked(&bases, &scalars).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -165,7 +164,9 @@ pub fn verify_aux<G: CurveGroup>(
         })
         .collect::<ProofResult<Vec<_>>>()?;
 
-    let (u_scalar, gs_scalars, hs_scalars) = {
+    let mut msm = Msm::new(statement.witness_size);
+
+    {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
 
         let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|(_, x)| *x).collect();
@@ -196,14 +197,16 @@ pub fn verify_aux<G: CurveGroup>(
             batch_inversion(&mut ss_inverse);
             ss_inverse
         };
-        (
-            (a * b),
-            ss.iter().copied().scale(a).collect(),
-            ss_inverse.iter().copied().scale(b).collect(),
-        )
+
+        msm.upsert(crs.u, a * b);
+        msm.upsert_batch(&crs.gs[0..n], &ss.into_iter().scale(a).collect::<Vec<_>>());
+        msm.upsert_batch(
+            &crs.hs[0..n],
+            &ss_inverse.into_iter().scale(b).collect::<Vec<_>>(),
+        );
     };
 
-    let (rhs_bases, rhs_scalars) = {
+    {
         let mut bases: Vec<G> = {
             let mut v = Vec::with_capacity(2 * log2_n + 1);
             v.push(statement.p);
@@ -220,19 +223,12 @@ pub fn verify_aux<G: CurveGroup>(
             bases.push(right);
             scalars.push(x.inverse().expect("non-zero inverse").square());
         });
-        (G::normalize_batch(&bases), scalars)
+        let bases = G::normalize_batch(&bases);
+        scalars = scalars.into_iter().scale(-G::ScalarField::one()).collect();
+        msm.upsert_batch(&bases, &scalars);
     };
 
-    let res = Msm {
-        u_scalar,
-        gs_scalars,
-        hs_scalars,
-        rhs_bases,
-        rhs_scalars,
-        n,
-    };
-
-    Ok(res)
+    Ok(msm)
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
@@ -242,7 +238,7 @@ pub fn verify<G: CurveGroup>(
     statement: &Statement<G>,
 ) -> ProofResult<()> {
     let proof = verify_aux(verifier_state, crs, statement)?;
-    let (bases, scalars) = (proof.bases(crs), proof.scalars());
+    let (bases, scalars) = proof.bases_and_scalars();
     let g = G::msm_unchecked(&bases, &scalars);
     if g.is_zero() {
         Ok(())
@@ -294,6 +290,9 @@ mod tests_proof {
           let witness: Witness<Projective> = Witness::rand(n, &mut rng);
           (crs, witness)
       })) {
+
+            println!("--- original ---");
+
             {
               let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-ipa");
@@ -315,6 +314,8 @@ mod tests_proof {
               fast_verifier_state.ratchet().expect("failed to ratchet");
               verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
             }
+
+            println!("--- extended ---");
 
             {
 
@@ -383,7 +384,7 @@ mod tests_proof {
 
         let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
 
-        verify_batch_aux(&crs, verifications, &mut OsRng).expect("should verify batch");
+        verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
       }
     }
 }
