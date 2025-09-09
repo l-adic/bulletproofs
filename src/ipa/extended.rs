@@ -21,12 +21,10 @@ where
     G: CurveGroup,
     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
 {
-    /// The IO of the bulletproof statement
     fn extended_bulletproof_statement(self) -> Self {
         self.bulletproof_statement().add_scalars(1, "dot-product")
     }
 
-    /// The IO of the bulletproof protocol
     fn add_extended_bulletproof(self, len: usize) -> Self {
         self.challenge_scalars(1, "x").add_bulletproof(len)
     }
@@ -41,13 +39,14 @@ pub fn prove<G: CurveGroup>(
     let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
+        witness_size: witness.size(),
     };
     let crs_mod = CRS {
         gs: crs.gs.clone(),
         hs: crs.hs.clone(),
         u: crs.u.mul(x).into_affine(),
     };
-    ipa::prove(prover_state, &crs_mod, &statement, witness)
+    ipa::prove(prover_state, &crs_mod, statement, witness)
 }
 
 pub fn verify<G: CurveGroup>(
@@ -61,6 +60,7 @@ where
     let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
+        witness_size: ext_statement.witness_size,
     };
     let crs_mod = CRS {
         gs: crs.gs.clone(),

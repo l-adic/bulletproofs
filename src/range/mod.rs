@@ -11,7 +11,10 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::{iter::successors, ops::Mul};
+use std::{
+    iter::{repeat, successors},
+    ops::Mul,
+};
 use tracing::instrument;
 
 use crate::{
@@ -235,18 +238,17 @@ pub fn verify<G: CurveGroup>(
         let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
 
         let p: G = {
-            let hs_scalars: Vec<G::ScalarField> = y_vec
-                .iter()
-                .copied()
-                .scale(z)
-                .vector_add(two_vec.iter().copied().scale(z.square()))
-                .collect();
-            let neg_z: Vec<G::ScalarField> = vec![-z; n_bits];
             a + s.mul(x) + {
-                let bases: Vec<G::Affine> =
-                    gs.iter().copied().chain(hs_prime.iter().copied()).collect();
-                let scalars: Vec<G::ScalarField> =
-                    neg_z.into_iter().chain(hs_scalars.into_iter()).collect();
+                let bases: Vec<G::Affine> = gs.iter().chain(hs_prime.iter()).copied().collect();
+                let scalars: Vec<G::ScalarField> = {
+                    let neg_z = repeat(-z).take(n_bits);
+                    let hs_scalars = y_vec
+                        .iter()
+                        .copied()
+                        .scale(z)
+                        .vector_add(two_vec.iter().copied().scale(z.square()));
+                    neg_z.chain(hs_scalars).collect()
+                };
                 G::msm_unchecked(&bases, &scalars)
             }
         };
@@ -254,6 +256,7 @@ pub fn verify<G: CurveGroup>(
         let extended_statement = ipa_types::extended::Statement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
+            witness_size: n_bits,
         };
 
         let crs = ipa_types::CRS {

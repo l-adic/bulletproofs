@@ -225,7 +225,7 @@ pub fn verify<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &types::CRS<G>,
     circuit: &types::Circuit<G::ScalarField>,
-    statement: Statement<G>,
+    statement: &Statement<G>,
 ) -> ProofResult<()> {
     let n = circuit.dim();
     let q = circuit.size();
@@ -319,6 +319,7 @@ pub fn verify<G: CurveGroup>(
         let extended_statement = ipa_types::extended::Statement {
             p: p_with_mu,
             c: t_hat,
+            witness_size: n,
         };
 
         let crs = ipa_types::CRS {
@@ -375,7 +376,7 @@ mod tests {
             verifier_state.public_points(&statement.v).expect("cannot add statement");
             verifier_state.ratchet().expect("failed to ratchet");
 
-            verify(&mut verifier_state, &crs, &circuit, statement).expect("proof should verify");
+            verify(&mut verifier_state, &crs, &circuit, &statement).expect("proof should verify");
         }
     }
 }

@@ -2,7 +2,10 @@ use ark_ec::CurveGroup;
 use ark_ff::UniformRand;
 use proptest::prelude::*;
 use rand::rngs::OsRng;
-use std::ops::{Add, Mul};
+use std::{
+    iter::once,
+    ops::{Add, Mul},
+};
 
 use crate::vector_ops::{VectorOps, inner_product};
 
@@ -58,6 +61,10 @@ impl<G: CurveGroup> Witness<G> {
         Witness { a, b, c }
     }
 
+    pub fn size(&self) -> usize {
+        self.a.len()
+    }
+
     pub fn rand<Rng: rand::Rng>(size: u64, rng: &mut Rng) -> Self {
         let a = (0..size)
             .map(|_| G::ScalarField::rand(rng))
@@ -74,18 +81,23 @@ impl<G: CurveGroup> Witness<G> {
     }
 
     pub fn statement(&self, crs: &CRS<G>) -> Statement<G> {
-        let g: G = G::msm_unchecked(&crs.gs, &self.a);
-        let h: G = G::msm_unchecked(&crs.hs, &self.b);
+        let g: G = G::msm_unchecked(&crs.gs[0..self.size()], &self.a);
+        let h: G = G::msm_unchecked(&crs.hs[0..self.size()], &self.b);
         let p: G = g.add(&h).add(&crs.u.mul(self.c));
-        Statement { p }
+        Statement {
+            p,
+            witness_size: self.size(),
+        }
     }
 
     pub fn extended_statement(&self, crs: &CRS<G>) -> extended::Statement<G> {
+        let size = self.size();
         let bases: Vec<G::Affine> = crs
             .gs
             .iter()
+            .take(size)
             .copied()
-            .chain(crs.hs.iter().copied())
+            .chain(crs.hs.iter().take(size).copied())
             .collect();
         let scalars: Vec<G::ScalarField> = self
             .a
@@ -94,7 +106,11 @@ impl<G: CurveGroup> Witness<G> {
             .chain(self.b.iter().copied())
             .collect();
         let p = G::msm_unchecked(&bases, &scalars);
-        extended::Statement { p, c: self.c() }
+        extended::Statement {
+            p,
+            c: self.c(),
+            witness_size: self.size(),
+        }
     }
 }
 
@@ -124,16 +140,77 @@ impl<G: CurveGroup> Add for Witness<G> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Statement<G: CurveGroup> {
     pub p: G,
+    pub witness_size: usize,
 }
 
 impl<G: CurveGroup> Add for Statement<G> {
     type Output = Statement<G>;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Statement { p: self.p + rhs.p }
+        assert_eq!(self.witness_size, rhs.witness_size);
+        Statement {
+            p: self.p + rhs.p,
+            witness_size: self.witness_size,
+        }
+    }
+}
+
+pub struct Msm<G: CurveGroup> {
+    pub(super) u_scalar: G::ScalarField,
+    pub(super) gs_scalars: Vec<G::ScalarField>,
+    pub(super) hs_scalars: Vec<G::ScalarField>,
+    pub(super) rhs_bases: Vec<G::Affine>,
+    pub(super) rhs_scalars: Vec<G::ScalarField>,
+    pub(super) n: usize,
+}
+
+impl<G: CurveGroup> Msm<G> {
+    pub(super) fn scale(&mut self, scalar: G::ScalarField) {
+        self.u_scalar *= scalar;
+        self.gs_scalars.iter_mut().for_each(|s| *s *= scalar);
+        self.hs_scalars.iter_mut().for_each(|s| *s *= scalar);
+        self.rhs_scalars.iter_mut().for_each(|s| *s *= scalar);
+    }
+
+    pub(super) fn batch(&mut self, rhs: Msm<G>) {
+        assert!(
+            self.n == rhs.n,
+            "cannot batch proofs with different witness sizes"
+        );
+
+        self.u_scalar += rhs.u_scalar;
+
+        self.gs_scalars
+            .iter_mut()
+            .zip(rhs.gs_scalars.iter())
+            .for_each(|(a, b)| *a += *b);
+
+        self.hs_scalars
+            .iter_mut()
+            .zip(rhs.hs_scalars.iter())
+            .for_each(|(a, b)| *a += *b);
+
+        self.rhs_bases.extend(rhs.rhs_bases);
+        self.rhs_scalars.extend(rhs.rhs_scalars);
+    }
+
+    pub(super) fn bases(&self, crs: &CRS<G>) -> Vec<G::Affine> {
+        once(crs.u)
+            .chain(crs.gs[0..self.n].iter().copied())
+            .chain(crs.hs[0..self.n].iter().copied())
+            .chain(self.rhs_bases.iter().copied())
+            .collect()
+    }
+
+    pub(super) fn scalars(&self) -> Vec<G::ScalarField> {
+        once(self.u_scalar)
+            .chain(self.gs_scalars.iter().copied())
+            .chain(self.hs_scalars.iter().copied())
+            .chain(self.rhs_scalars.iter().map(|x| -*x))
+            .collect()
     }
 }
 
@@ -143,6 +220,7 @@ pub mod extended {
     pub struct Statement<G: CurveGroup> {
         pub p: G,
         pub c: G::ScalarField,
+        pub witness_size: usize,
     }
 }
 

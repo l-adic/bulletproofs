@@ -274,6 +274,7 @@ pub fn verify<G: CurveGroup>(
         let extended_statement = ipa_types::extended::Statement {
             p: p + crs.h.mul(-mu),
             c: t_hat,
+            witness_size: n_bits * m,
         };
 
         let crs = ipa_types::CRS {
