@@ -1,6 +1,6 @@
 use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, Field, One, PrimeField};
-use std::ops::Mul;
+use std::iter::successors;
 
 // Decompose a field element into a vector of its bits (as field elements)
 // E.g. for a field element a, return [a_0, a_1, ..., a_{n-1}] where
@@ -22,15 +22,10 @@ pub(super) fn bit_decomposition<Fr: PrimeField>(a: Fr) -> Vec<Fr> {
 pub(super) fn create_hs_prime<G: CurveGroup>(
     hs: &[G::Affine],
     y: G::ScalarField,
-) -> Vec<G::Affine> {
+) -> Vec<(G::Affine, G::ScalarField)> {
     let y_inv = y.inverse().expect("non-zero y");
-    let ys_inv = std::iter::successors(Some(G::ScalarField::one()), |&x| (Some(x * y_inv)));
-    G::normalize_batch(
-        &hs.iter()
-            .zip(ys_inv)
-            .map(|(h, y_inv)| h.mul(y_inv))
-            .collect::<Vec<_>>(),
-    )
+    let ys_inv = successors(Some(G::ScalarField::one()), |&x| (Some(x * y_inv)));
+    hs.iter().copied().zip(ys_inv).collect::<Vec<_>>()
 }
 
 #[cfg(test)]

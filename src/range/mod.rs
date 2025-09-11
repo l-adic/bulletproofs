@@ -170,7 +170,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(l, r);
 
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+        let hs_prime = G::normalize_batch(
+            &create_hs_prime::<G>(hs, y)
+                .into_iter()
+                .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                .collect::<Vec<_>>(),
+        );
 
         let mut extended_statement: ipa_types::extended::Statement<G> =
             witness.extended_statement(&crs.ipa_crs);
@@ -230,7 +235,14 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
         },
         || {
             let gs = &crs.ipa_crs.gs[0..n_bits];
-            let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+            let hs = &crs.ipa_crs.hs[0..n_bits];
+            let scaled_hs = create_hs_prime::<G>(hs, y);
+            let hs_prime = G::normalize_batch(
+                &scaled_hs
+                    .iter()
+                    .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                    .collect::<Vec<_>>(),
+            );
 
             let p: G = {
                 a + s.mul(x) + {
@@ -254,12 +266,9 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
                 witness_size: n_bits,
             };
 
-            let crs = ipa_types::CRS {
-                gs: gs.to_vec(),
-                hs: hs_prime,
-                u: crs.ipa_crs.u,
-            };
-            extended::verify_aux(verifier_state, &crs, &extended_statement)
+            let mut msm = extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
+            msm.scale_elems(scaled_hs.into_iter());
+            Ok::<_, ProofError>(msm)
         },
     );
     let mut msm = msm?;

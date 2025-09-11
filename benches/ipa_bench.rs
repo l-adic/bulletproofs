@@ -13,6 +13,7 @@ use common::BoundedProofQueue;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use nonempty::NonEmpty;
 use rand::rngs::OsRng;
+use rayon::prelude::*;
 use spongefish::{DomainSeparator, ProofError, codecs::arkworks_algebra::CommonGroupToUnit};
 
 struct ProofData {
@@ -20,7 +21,7 @@ struct ProofData {
     domain_separator: DomainSeparator,
 }
 
-const BATCH_SIZE: usize = 5;
+const BATCH_SIZE: usize = 100;
 
 fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
     c: &mut Criterion,
@@ -90,7 +91,7 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
                 let selected_proofs = proofs.choose_multiple(rng, BATCH_SIZE);
 
                 let verifications = selected_proofs
-                    .into_iter()
+                    .into_par_iter()
                     .map(
                         |(
                             statement,

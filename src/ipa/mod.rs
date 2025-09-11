@@ -172,10 +172,12 @@ pub fn verify_aux<G: CurveGroup>(
         };
 
         msm.upsert(crs.u, a * b);
-        msm.upsert_batch(&crs.gs[0..n], &ss.into_iter().scale(a).collect::<Vec<_>>());
+        msm.upsert_batch(crs.gs[0..n].iter().copied().zip(ss.into_iter().scale(a)));
         msm.upsert_batch(
-            &crs.hs[0..n],
-            &ss_inverse.into_iter().scale(b).collect::<Vec<_>>(),
+            crs.hs[0..n]
+                .iter()
+                .copied()
+                .zip(ss_inverse.into_iter().scale(b)),
         );
     };
 
@@ -196,9 +198,9 @@ pub fn verify_aux<G: CurveGroup>(
             bases.push(right);
             scalars.push(x.inverse().expect("non-zero inverse").square());
         });
-        let bases = G::normalize_batch(&bases);
+        let bases: Vec<G::Affine> = G::normalize_batch(&bases);
         scalars = scalars.into_iter().scale(-G::ScalarField::one()).collect();
-        msm.upsert_batch(&bases, &scalars);
+        msm.upsert_batch(bases.into_iter().zip(scalars));
     };
 
     Ok(msm)
@@ -266,8 +268,6 @@ mod tests_proof {
           (crs, witness)
       })) {
 
-            println!("--- original ---");
-
             {
               let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-ipa");
@@ -289,8 +289,6 @@ mod tests_proof {
               fast_verifier_state.ratchet().expect("failed to ratchet");
               verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
             }
-
-            println!("--- extended ---");
 
             {
 

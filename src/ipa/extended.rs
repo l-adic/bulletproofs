@@ -79,12 +79,7 @@ pub fn verify_aux<G: CurveGroup>(
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
         witness_size: ext_statement.witness_size,
     };
-    let crs_mod = CRS {
-        gs: crs.gs.clone(),
-        hs: crs.hs.clone(),
-        u: crs.u.mul(x).into_affine(),
-    };
-    let mut msm = ipa::verify_aux(verifier_state, &crs_mod, &statement)?;
-    msm.msm.entry(crs.u).and_modify(|s| *s *= x);
+    let mut msm = ipa::verify_aux(verifier_state, crs, &statement)?;
+    msm.scale_elem(crs.u, x);
     Ok(msm)
 }

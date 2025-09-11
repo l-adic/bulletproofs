@@ -3,16 +3,18 @@ use std::{iter::successors, ops::Mul};
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
-    DomainSeparator, ProofResult, ProverState, VerifierState,
+    DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
     codecs::arkworks_algebra::{
         FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
+use tracing::instrument;
 
 use crate::{
     circuit::types::Statement,
     ipa::{extended::ExtendedBulletproofDomainSeparator, types as ipa_types},
+    msm::Msm,
     range::types::VectorPolynomial,
     vector_ops::{VectorOps, inner_product, mat_mul_l, mat_mul_r},
 };
@@ -63,19 +65,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let [alpha, beta, rho]: [G::ScalarField; 3] =
         std::array::from_fn(|_| G::ScalarField::rand(rng));
 
-    let a_i = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-        let scalars: Vec<G::ScalarField> = witness
-            .a_l
-            .iter()
-            .chain(witness.a_r.iter())
-            .copied()
-            .collect();
-        G::msm_unchecked(&bases, &scalars)
-    };
-
-    let a_o = crs.h.mul(beta) + G::msm_unchecked(gs, &witness.a_o);
-
+    // Generate s_l and s_r vectors needed for s computation
     let s_l = (0..n)
         .map(|_| G::ScalarField::rand(rng))
         .collect::<Vec<_>>();
@@ -83,11 +73,34 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         .map(|_| G::ScalarField::rand(rng))
         .collect::<Vec<_>>();
 
-    let s = crs.h.mul(rho) + {
-        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-        let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
-        G::msm_unchecked(&bases, &scalars)
-    };
+    // Compute a_i, a_o, and s in parallel
+    let (a_i, (a_o, s)) = rayon::join(
+        || {
+            crs.h.mul(alpha) + {
+                let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+                let scalars: Vec<G::ScalarField> = witness
+                    .a_l
+                    .iter()
+                    .chain(witness.a_r.iter())
+                    .copied()
+                    .collect();
+                G::msm_unchecked(&bases, &scalars)
+            }
+        },
+        || {
+            rayon::join(
+                || crs.h.mul(beta) + G::msm_unchecked(gs, &witness.a_o),
+                || {
+                    crs.h.mul(rho) + {
+                        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+                        let scalars: Vec<G::ScalarField> =
+                            s_l.iter().chain(s_r.iter()).copied().collect();
+                        G::msm_unchecked(&bases, &scalars)
+                    }
+                },
+            )
+        },
+    );
 
     prover_state.add_points(&[a_i, a_o, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
@@ -189,7 +202,14 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let r = r_poly.evaluate(x);
 
         let witness = ipa_types::Witness::new(l, r);
-        let hs_prime = create_hs_prime::<G>(hs, y);
+        let hs_prime = {
+            let xs = create_hs_prime::<G>(hs, y);
+            G::normalize_batch(
+                &xs.iter()
+                    .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                    .collect::<Vec<_>>(),
+            )
+        };
 
         let mut extended_statement: ipa_types::extended::Statement<G> =
             witness.extended_statement(&crs.ipa_crs);
@@ -210,23 +230,22 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-fn create_hs_prime<G: CurveGroup>(hs: &[G::Affine], y: G::ScalarField) -> Vec<G::Affine> {
+fn create_hs_prime<G: CurveGroup>(
+    hs: &[G::Affine],
+    y: G::ScalarField,
+) -> Vec<(G::Affine, G::ScalarField)> {
     let y_inv = y.inverse().expect("non-zero y");
     let ys_inv = std::iter::successors(Some(G::ScalarField::one()), |&x| (Some(x * y_inv)));
-    G::normalize_batch(
-        &hs.iter()
-            .zip(ys_inv)
-            .map(|(h, y_inv)| h.mul(y_inv))
-            .collect::<Vec<_>>(),
-    )
+    hs.iter().copied().zip(ys_inv).collect::<Vec<_>>()
 }
 
-pub fn verify<G: CurveGroup>(
+pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
     verifier_state: &mut VerifierState,
     crs: &types::CRS<G>,
     circuit: &types::Circuit<G::ScalarField>,
     statement: &Statement<G>,
-) -> ProofResult<()> {
+    rng: &mut Rng,
+) -> ProofResult<Msm<G>> {
     let n = circuit.dim();
     let q = circuit.size();
     let gs = &crs.ipa_crs.gs[0..n];
@@ -261,76 +280,124 @@ pub fn verify<G: CurveGroup>(
         .take(q)
         .collect();
 
-    let delta_y_z = {
-        let v = mat_mul_l(&z_vec, &circuit.w_r);
-        let l = y_inv_vec.iter().copied().hadamard(v);
-        let r = mat_mul_l(&z_vec, &circuit.w_l);
-        inner_product(l, r)
-    };
+    let mut g: Msm<G> = {
+        let mut g = Msm::new();
 
-    {
-        let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
-
-        let rhs = crs.g.mul(
-            x.square()
-                * (delta_y_z + inner_product(z_vec.iter().copied(), circuit.c.iter().copied())),
-        ) + {
-            let scalars = mat_mul_l(&z_vec, &circuit.w_v)
-                .map(|zi| x.square() * zi)
-                .collect::<Vec<_>>();
-            G::msm_unchecked(&G::normalize_batch(&statement.v), &scalars)
-        } + {
-            tts.iter()
-                .enumerate()
-                .filter_map(|(i, tt_i_opt)| tt_i_opt.map(|tt_i| tt_i.mul(x.pow([i as u64 + 1]))))
-                .fold(G::zero(), |acc, val| acc + val)
-        };
-        assert!((lhs - rhs).is_zero(), "Failed to verify t_hat = t(x)");
-    };
-    {
-        let hs_prime = create_hs_prime::<G>(hs, y);
-
-        let ww_l = G::msm_unchecked(
-            &hs_prime,
-            &mat_mul_l(&z_vec, &circuit.w_l).collect::<Vec<_>>(),
-        );
-        let ww_r = {
+        let delta_y_z = {
             let v = mat_mul_l(&z_vec, &circuit.w_r);
-            let scalars = y_inv_vec.iter().copied().hadamard(v).collect::<Vec<_>>();
-            G::msm_unchecked(gs, &scalars)
+            let l = y_inv_vec.iter().copied().hadamard(v);
+            let r = mat_mul_l(&z_vec, &circuit.w_l);
+            inner_product(l, r)
         };
-        let ww_o = G::msm_unchecked(
-            &hs_prime,
-            &mat_mul_l(&z_vec, &circuit.w_o).collect::<Vec<_>>(),
+
+        g.upsert_batch(
+            G::normalize_batch(&statement.v)
+                .into_iter()
+                .zip(mat_mul_l(&z_vec, &circuit.w_v).scale(x.square())),
+        );
+
+        g.upsert_batch(tts.iter().enumerate().filter_map(|(i, tt_i_opt)| {
+            tt_i_opt.map(|tt_i| (tt_i.into_affine(), x.pow([i as u64 + 1])))
+        }));
+
+        g.upsert_batch(
+            [
+                (
+                    crs.g.into_affine(),
+                    (x.square()
+                        * (delta_y_z
+                            + inner_product(z_vec.iter().copied(), circuit.c.iter().copied())))
+                        - t_hat,
+                ),
+                (crs.h.into_affine(), -tao_x),
+            ]
+            .into_iter(),
+        );
+
+        g
+    };
+    let mut msm = {
+        let scaled_hs = create_hs_prime::<G>(hs, y);
+        let hs_prime = G::normalize_batch(
+            &scaled_hs
+                .iter()
+                .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut p_msm: Msm<G> = Msm::new();
+
+        //ww_l
+        p_msm.upsert_batch(
+            hs_prime
+                .iter()
+                .copied()
+                .zip(mat_mul_l(&z_vec, &circuit.w_l).scale(x)),
+        );
+
+        //ww_r
+        p_msm.upsert_batch(
+            gs.iter().copied().zip(
+                y_inv_vec
+                    .iter()
+                    .copied()
+                    .hadamard(mat_mul_l(&z_vec, &circuit.w_r))
+                    .scale(x),
+            ),
+        );
+
+        //ww_o
+        p_msm.upsert_batch(
+            hs_prime
+                .iter()
+                .copied()
+                .zip(mat_mul_l(&z_vec, &circuit.w_o)),
         );
 
         let neg_y_vec = y_vec.iter().map(|yi| -*yi).collect::<Vec<_>>();
+        p_msm.upsert_batch(hs_prime.iter().copied().zip(neg_y_vec));
 
-        let p: G = a_i.mul(x)
-            + a_o.mul(x.square())
-            + G::msm_unchecked(&hs_prime, &neg_y_vec)
-            + ww_l.mul(x)
-            + ww_r.mul(x)
-            + ww_o
-            + s.mul(x.pow([3]));
+        p_msm.upsert(a_i.into_affine(), x);
+        p_msm.upsert(s.into_affine(), x.pow([3]));
+        p_msm.upsert(a_o.into_affine(), x.square());
+        p_msm.upsert(crs.h.into_affine(), -mu);
 
-        let p_with_mu = p + crs.h.mul(-mu);
+        let p: G = p_msm.execute();
 
         let extended_statement = ipa_types::extended::Statement {
-            p: p_with_mu,
+            p,
             c: t_hat,
             witness_size: n,
         };
 
-        let crs = ipa_types::CRS {
-            gs: gs.to_vec(),
-            hs: hs_prime,
-            u: crs.ipa_crs.u,
-        };
-        crate::ipa::extended::verify(verifier_state, &crs, &extended_statement)
+        let mut msm =
+            crate::ipa::extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
+        msm.scale_elems(scaled_hs.into_iter());
+        Ok::<_, ProofError>(msm)
     }?;
 
-    Ok(())
+    let alpha = G::ScalarField::rand(rng);
+    g.scale(alpha);
+    msm.batch(g);
+
+    Ok(msm)
+}
+
+#[instrument(skip_all, fields(nbits = statement.v.len()), level = "debug")]
+pub fn verify<G: CurveGroup, Rng: rand::Rng>(
+    verifier_state: &mut spongefish::VerifierState,
+    crs: &types::CRS<G>,
+    circuit: &types::Circuit<G::ScalarField>,
+    statement: &Statement<G>,
+    rng: &mut Rng,
+) -> ProofResult<()> {
+    let msm = verify_aux(verifier_state, crs, circuit, statement, rng)?;
+    let g = msm.execute();
+    if g.is_zero() {
+        Ok(())
+    } else {
+        Err(ProofError::InvalidProof)
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +408,7 @@ mod tests {
     use ark_secp256k1::{Fr, Projective};
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
+    use rayon::prelude::*;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
@@ -376,7 +444,51 @@ mod tests {
             verifier_state.public_points(&statement.v).expect("cannot add statement");
             verifier_state.ratchet().expect("failed to ratchet");
 
-            verify(&mut verifier_state, &crs, &circuit, &statement).expect("proof should verify");
+            verify(&mut verifier_state, &crs, &circuit, &statement, &mut OsRng).expect("proof should verify");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(Config::with_cases(2))]
+        #[test]
+        fn test_batch_circuit_proof_verify_works(
+           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16)], 4usize..50)
+        ) {
+            let mut rng = OsRng;
+
+            let domain_separator = DomainSeparator::new("test-circuit-proof-batch");
+
+            let circuits_and_witnesses = (0..4).map(|_| {
+                types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng)
+            }).collect::<Vec<_>>();
+
+            let crs: types::CRS<Projective> = types::CRS::rand(n, &mut rng);
+
+            let statements = circuits_and_witnesses.iter().map(|(circuit, witness)| {
+                assert!(circuit.is_satisfied_by(witness), "Circuit not satisfied by witness");
+                (circuit, witness, Statement::new(&crs, witness))
+            }).collect::<Vec<_>>();
+
+            let proofs = statements.par_iter().map(|(circuit, witness, statement)| {
+                let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(domain_separator.clone(), statement.v.len()).ratchet();
+                let domain_separator = CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n);
+                let mut prover_state = domain_separator.to_prover_state();
+                prover_state.public_points(&statement.v)?;
+                prover_state.ratchet().unwrap();
+                let proof = prove(&mut prover_state, &crs, circuit, witness, &mut OsRng)?;
+                Ok((circuit, statement, proof, domain_separator))
+            }).collect::<Result<Vec<_>, ProofError>>()?;
+
+            let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(circuit, statement, proof, domain_separator)| {
+                let mut verifier_state = domain_separator.to_verifier_state(proof);
+                verifier_state.public_points(&statement.v)?;
+                verifier_state.ratchet().unwrap();
+                verify_aux(&mut verifier_state, &crs, circuit, statement, &mut OsRng)
+            }).collect::<Result<Vec<_>, ProofError>>()?;
+
+            let verifications = nonempty::NonEmpty::from_vec(verifications).expect("non-empty vec");
+
+            crate::msm::verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
         }
     }
 }

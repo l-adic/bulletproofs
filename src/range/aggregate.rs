@@ -1,7 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, UniformRand, Zero};
 use spongefish::{
-    DomainSeparator, ProofResult, ProverState,
+    DomainSeparator, ProofError, ProofResult, ProverState,
     codecs::arkworks_algebra::{
         FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
@@ -16,6 +16,7 @@ use crate::{
     range::types::aggregate::{Statement, Witness},
 };
 use crate::{
+    msm::Msm,
     range::{
         types::{CRS, VectorPolynomial},
         utils::{bit_decomposition, create_hs_prime},
@@ -170,7 +171,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(l, r);
 
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
+        let hs_prime = G::normalize_batch(
+            &create_hs_prime::<G>(hs, y)
+                .into_iter()
+                .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                .collect::<Vec<_>>(),
+        );
 
         let mut extended_statement = witness.extended_statement(&crs.ipa_crs);
 
@@ -190,11 +196,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 }
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
-pub fn verify<G: CurveGroup>(
+pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
     verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<()> {
+    rng: &mut Rng,
+) -> ProofResult<Msm<G>> {
     let n_bits = statement.n_bits;
     let m = statement.v.len();
 
@@ -214,12 +221,11 @@ pub fn verify<G: CurveGroup>(
             .take(n_bits * m)
             .collect();
 
-    {
-        let tt1 = tt1.into_affine();
-        let tt2 = tt2.into_affine();
+    let (g, msm) = rayon::join(
+        || {
+            let tt1 = tt1.into_affine();
+            let tt2 = tt2.into_affine();
 
-        let lhs = crs.g.mul(t_hat) + crs.h.mul(tao_x);
-        let rhs = {
             let sigma_summand: G::ScalarField = {
                 let d = sum(two_vec.iter().copied());
                 let z_vec = successors(Some(z.square() * z), |succ| Some(*succ * z)).take(m);
@@ -236,64 +242,90 @@ pub fn verify<G: CurveGroup>(
 
             let vs = G::normalize_batch(&statement.v);
 
-            crs.g.mul(delta_y_z) + G::msm_unchecked(&vs, &z_vec) + tt1.mul(x) + tt2.mul(x.square())
-        };
-        assert!(
-            (lhs - rhs).is_zero(),
-            "Failed to verify t_hat = t(x) = t_0 + t_1 x + t_2 x^2"
-        );
-    };
+            crs.g.mul(t_hat - delta_y_z) + crs.h.mul(tao_x)
+                - (G::msm_unchecked(&vs, &z_vec) + tt1.mul(x) + tt2.mul(x.square()))
+        },
+        || {
+            let gs = &crs.ipa_crs.gs[0..n_bits * m];
+            let hs = &crs.ipa_crs.hs[0..n_bits * m];
+            let scaled_hs = create_hs_prime::<G>(hs, y);
+            let hs_prime = G::normalize_batch(
+                &scaled_hs
+                    .iter()
+                    .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                    .collect::<Vec<_>>(),
+            );
 
-    {
-        let gs = &crs.ipa_crs.gs[0..n_bits * m];
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits * m], y);
+            let p: G = {
+                let gs_scalars = std::iter::repeat(-z).take(n_bits * m);
 
-        let p: G = {
-            let gs_scalars = std::iter::repeat(-z).take(n_bits * m);
+                let hs_combined_scalars = {
+                    // Base term: z * y_vec[i] for each position i
+                    let base_terms = y_vec.iter().copied().scale(z);
 
-            let hs_combined_scalars = {
-                // Base term: z * y_vec[i] for each position i
-                let base_terms = y_vec.iter().copied().scale(z);
+                    // Sigma term: same pattern as prover's sigma_sum
+                    let sigma_terms = successors(Some(z.square()), |&z_pow| Some(z_pow * z))
+                        .take(m)
+                        .flat_map(|z_power| two_vec.iter().copied().scale(z_power));
 
-                // Sigma term: same pattern as prover's sigma_sum
-                let sigma_terms = successors(Some(z.square()), |&z_pow| Some(z_pow * z))
-                    .take(m)
-                    .flat_map(|z_power| two_vec.iter().copied().scale(z_power));
+                    base_terms.vector_add(sigma_terms)
+                };
 
-                base_terms.vector_add(sigma_terms)
+                {
+                    let bases: Vec<G::Affine> =
+                        gs.iter().copied().chain(hs_prime.iter().copied()).collect();
+                    let scalars: Vec<G::ScalarField> =
+                        gs_scalars.chain(hs_combined_scalars).collect();
+                    a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
+                }
             };
 
-            {
-                let bases: Vec<G::Affine> =
-                    gs.iter().copied().chain(hs_prime.iter().copied()).collect();
-                let scalars: Vec<G::ScalarField> = gs_scalars.chain(hs_combined_scalars).collect();
-                a + s.mul(x) + G::msm_unchecked(&bases, &scalars)
-            }
-        };
+            let extended_statement = ipa_types::extended::Statement {
+                p: p + crs.h.mul(-mu),
+                c: t_hat,
+                witness_size: n_bits * m,
+            };
 
-        let extended_statement = ipa_types::extended::Statement {
-            p: p + crs.h.mul(-mu),
-            c: t_hat,
-            witness_size: n_bits * m,
-        };
+            let mut msm =
+                ipa::extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
 
-        let crs = ipa_types::CRS {
-            gs: gs.to_vec(),
-            hs: hs_prime,
-            u: crs.ipa_crs.u,
-        };
-        ipa::extended::verify(verifier_state, &crs, &extended_statement)
-    }?;
+            msm.scale_elems(scaled_hs.into_iter());
+            Ok::<_, ProofError>(msm)
+        },
+    );
+    let mut msm = msm?;
 
-    Ok(())
+    let alpha = G::ScalarField::rand(rng);
+    msm.upsert(g.into_affine(), alpha);
+
+    Ok(msm)
 }
 
+#[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
+pub fn verify<G: CurveGroup, Rng: rand::Rng>(
+    verifier_state: &mut spongefish::VerifierState,
+    crs: &CRS<G>,
+    statement: &Statement<G>,
+    rng: &mut Rng,
+) -> ProofResult<()> {
+    let msm = verify_aux(verifier_state, crs, statement, rng)?;
+    let g = msm.execute();
+    if g.is_zero() {
+        Ok(())
+    } else {
+        Err(ProofError::InvalidProof)
+    }
+}
 #[cfg(test)]
 mod tests_range {
+    use crate::msm::verify_batch_aux;
+
     use super::*;
     use ark_secp256k1::{Fr, Projective};
+    use nonempty::NonEmpty;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
+    use rayon::prelude::*;
     use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
@@ -319,11 +351,9 @@ mod tests_range {
 
             let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-range-proof");
-                // add the IO of the bulletproof statement
                 let domain_separator =
                     AggregatedRangeProofDomainSeparator::<Projective>::aggregated_range_proof_statement(domain_separator, m)
                         .ratchet();
-                // add the IO of the bulletproof protocol (the transcript)
                 AggregatedRangeProofDomainSeparator::<Projective>::add_aggregated_range_proof(domain_separator, n_bits, m)
             };
 
@@ -342,7 +372,53 @@ mod tests_range {
                 .public_points(&statement.v)
                 .expect("cannot add statment");
             verifier_state.ratchet().expect("failed to ratchet");
-            verify(&mut verifier_state, &crs, &statement).expect("proof should verify")
+            verify(&mut verifier_state, &crs, &statement, &mut rng).expect("proof should verify")
         }
+    }
+
+    proptest! {
+      #![proptest_config(Config::with_cases(2))]
+      #[test]
+      fn test_batch_aggregated_range_proof_verify_works(
+          n_bits in prop_oneof![Just(8usize), Just(16), Just(32)],
+          m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16)]
+      ) {
+
+        let mut rng = OsRng;
+        let crs: CRS<Projective> = CRS::rand(n_bits * m, &mut rng);
+
+        let domain_separator = DomainSeparator::new("test-aggregated-range-proof-batch");
+
+        let witnesses = (0..4).map(|_| {
+            let max_value = (1u128 << n_bits.min(127)) - 1;
+            let v: Vec<Fr> = (0..m)
+                .map(|_| Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value)))
+                .collect();
+            Witness::<Fr>::new(v, n_bits, &mut rng)
+        }).collect::<Vec<_>>();
+
+        let statements = witnesses.iter().map(|w| (w, Statement::new(&crs, w))).collect::<Vec<_>>();
+
+        let proofs = statements.par_iter().map(|(witness, statement)| {
+            let domain_separator = AggregatedRangeProofDomainSeparator::<Projective>::aggregated_range_proof_statement(domain_separator.clone(), m).ratchet();
+            let domain_separator = AggregatedRangeProofDomainSeparator::<Projective>::add_aggregated_range_proof(domain_separator, n_bits, m);
+            let mut prover_state = domain_separator.to_prover_state();
+            prover_state.public_points(&statement.v)?;
+            prover_state.ratchet().unwrap();
+            let proof = prove(prover_state, &crs, witness, &mut OsRng)?;
+            Ok((statement, proof, domain_separator))
+        }).collect::<Result<Vec<_>, spongefish::ProofError>>()?;
+
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+            let mut verifier_state = domain_separator.to_verifier_state(proof);
+            verifier_state.public_points(&statement.v)?;
+            verifier_state.ratchet().unwrap();
+            verify_aux(&mut verifier_state, &crs, statement, &mut OsRng)
+        }).collect::<Result<Vec<_>, spongefish::ProofError>>()?;
+
+        let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
+
+        verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
+      }
     }
 }
