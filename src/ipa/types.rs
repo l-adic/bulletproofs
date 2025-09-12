@@ -2,10 +2,7 @@ use ark_ec::CurveGroup;
 use ark_ff::UniformRand;
 use proptest::prelude::*;
 use rand::rngs::OsRng;
-use std::{
-    collections::HashMap,
-    ops::{Add, Mul},
-};
+use std::ops::{Add, Mul};
 
 use crate::vector_ops::{VectorOps, inner_product};
 
@@ -155,56 +152,6 @@ impl<G: CurveGroup> Add for Statement<G> {
             p: self.p + rhs.p,
             witness_size: self.witness_size,
         }
-    }
-}
-
-pub struct Msm<G: CurveGroup> {
-    pub msm: HashMap<G::Affine, G::ScalarField>,
-    pub(super) n: usize,
-}
-
-impl<G: CurveGroup> Msm<G> {
-    pub fn new(n: usize) -> Self {
-        Msm {
-            msm: HashMap::new(),
-            n,
-        }
-    }
-
-    pub fn upsert(&mut self, base: G::Affine, scalar: G::ScalarField) {
-        self.msm
-            .entry(base)
-            .and_modify(|s| *s += scalar)
-            .or_insert(scalar);
-    }
-
-    pub fn upsert_batch(&mut self, bases: &[G::Affine], scalars: &[G::ScalarField]) {
-        assert_eq!(bases.len(), scalars.len());
-        for (base, scalar) in bases.iter().zip(scalars.iter()) {
-            self.upsert(*base, *scalar);
-        }
-    }
-
-    pub(crate) fn scale(&mut self, scalar: G::ScalarField) {
-        for value in self.msm.values_mut() {
-            *value *= scalar;
-        }
-    }
-
-    pub(crate) fn batch(&mut self, rhs: Msm<G>) {
-        assert!(
-            self.n == rhs.n,
-            "cannot batch proofs with different witness sizes"
-        );
-
-        for (base, scalar) in rhs.msm {
-            self.upsert(base, scalar);
-        }
-    }
-
-    pub(crate) fn bases_and_scalars(self) -> (Vec<G::Affine>, Vec<G::ScalarField>) {
-        let (bases, scalars): (Vec<_>, Vec<_>) = self.msm.into_iter().unzip();
-        (bases, scalars)
     }
 }
 

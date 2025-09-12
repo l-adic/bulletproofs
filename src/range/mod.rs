@@ -4,7 +4,6 @@ pub(crate) mod utils;
 
 use ark_ec::CurveGroup;
 use ark_ff::{Field, One, UniformRand, Zero};
-use nonempty::NonEmpty;
 use spongefish::{
     DomainSeparator, ProofError, ProofResult, ProverState,
     codecs::arkworks_algebra::{
@@ -23,6 +22,7 @@ use crate::{
         extended::{self, ExtendedBulletproofDomainSeparator},
         types::{self as ipa_types},
     },
+    msm::Msm,
     range::{
         types::{CRS, Statement, VectorPolynomial, Witness},
         utils::{bit_decomposition, create_hs_prime},
@@ -170,7 +170,12 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         let witness = ipa_types::Witness::new(l, r);
 
-        let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+        let hs_prime = G::normalize_batch(
+            &create_hs_prime::<G>(hs, y)
+                .into_iter()
+                .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                .collect::<Vec<_>>(),
+        );
 
         let mut extended_statement: ipa_types::extended::Statement<G> =
             witness.extended_statement(&crs.ipa_crs);
@@ -190,31 +195,13 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-pub struct RangeMsm<G: CurveGroup> {
-    msm: ipa_types::Msm<G>,
-}
-
-impl<G: CurveGroup> RangeMsm<G> {
-    fn batch(&mut self, other: Self) {
-        self.msm.batch(other.msm);
-    }
-
-    fn scale(&mut self, scalar: G::ScalarField) {
-        self.msm.scale(scalar);
-    }
-
-    fn bases_and_scalars(self) -> (Vec<G::Affine>, Vec<G::ScalarField>) {
-        self.msm.bases_and_scalars()
-    }
-}
-
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
 pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
     verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> ProofResult<RangeMsm<G>> {
+) -> ProofResult<Msm<G>> {
     let n_bits = statement.n_bits;
     let [a, s]: [G; 2] = verifier_state.next_points()?;
     let [y, z]: [G::ScalarField; 2] = verifier_state.challenge_scalars()?;
@@ -248,7 +235,14 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
         },
         || {
             let gs = &crs.ipa_crs.gs[0..n_bits];
-            let hs_prime = create_hs_prime::<G>(&crs.ipa_crs.hs[0..n_bits], y);
+            let hs = &crs.ipa_crs.hs[0..n_bits];
+            let scaled_hs = create_hs_prime::<G>(hs, y);
+            let hs_prime = G::normalize_batch(
+                &scaled_hs
+                    .iter()
+                    .map(|(h, y_inv_i)| h.mul(y_inv_i))
+                    .collect::<Vec<_>>(),
+            );
 
             let p: G = {
                 a + s.mul(x) + {
@@ -272,12 +266,9 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
                 witness_size: n_bits,
             };
 
-            let crs = ipa_types::CRS {
-                gs: gs.to_vec(),
-                hs: hs_prime,
-                u: crs.ipa_crs.u,
-            };
-            extended::verify_aux(verifier_state, &crs, &extended_statement)
+            let mut msm = extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
+            msm.scale_elems(scaled_hs.into_iter());
+            Ok::<_, ProofError>(msm)
         },
     );
     let mut msm = msm?;
@@ -285,7 +276,7 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
     let alpha = G::ScalarField::rand(rng);
     msm.upsert(g.into_affine(), alpha);
 
-    Ok(RangeMsm { msm })
+    Ok(msm)
 }
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
@@ -295,39 +286,9 @@ pub fn verify<G: CurveGroup, Rng: rand::Rng>(
     statement: &Statement<G>,
     rng: &mut Rng,
 ) -> ProofResult<()> {
-    let (bases, scalars) = {
-        let RangeMsm { msm } = verify_aux(verifier_state, crs, statement, rng)?;
-        msm.bases_and_scalars()
-    };
-    let g = G::msm_unchecked(&bases, &scalars);
+    let msm = verify_aux(verifier_state, crs, statement, rng)?;
+    let g = msm.execute();
     if g.is_zero() {
-        Ok(())
-    } else {
-        Err(ProofError::InvalidProof)
-    }
-}
-
-#[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
-pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
-    proofs: NonEmpty<RangeMsm<G>>,
-    rng: &mut Rng,
-) -> ProofResult<()> {
-    let alpha = G::ScalarField::rand(rng);
-    let powers_of_alpha = successors(Some(G::ScalarField::one()), |state| Some(*state * alpha));
-    let combined_proof = proofs
-        .into_iter()
-        .zip(powers_of_alpha)
-        .map(|(mut proof, scalar)| {
-            proof.scale(scalar);
-            proof
-        })
-        .reduce(|mut acc, proof| {
-            acc.batch(proof);
-            acc
-        })
-        .expect("non-empty vec");
-    let (bases, scalars) = combined_proof.bases_and_scalars();
-    if G::msm_unchecked(&bases, &scalars).is_zero() {
         Ok(())
     } else {
         Err(ProofError::InvalidProof)
@@ -336,8 +297,11 @@ pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
 
 #[cfg(test)]
 mod tests_range {
+    use crate::msm::verify_batch_aux;
+
     use super::*;
     use ark_secp256k1::{Fr, Projective};
+    use nonempty::NonEmpty;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
     use rayon::prelude::*;
@@ -413,7 +377,7 @@ mod tests_range {
             Ok((statement, proof, domain_separator))
         }).collect::<Result<Vec<_>, ProofError>>()?;
 
-        let verifications: Vec<RangeMsm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v])?;
             verifier_state.ratchet().unwrap();

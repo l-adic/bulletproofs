@@ -2,13 +2,13 @@ pub mod extended;
 pub mod types;
 
 use crate::{
-    ipa::types::{CRS, Msm, Statement, Witness},
+    ipa::types::{CRS, Statement, Witness},
+    msm::Msm,
     vector_ops::{VectorOps, inner_product},
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, One, UniformRand, batch_inversion};
+use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
-use nonempty::NonEmpty;
 use rayon::prelude::*;
 use spongefish::{
     DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
@@ -17,7 +17,7 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::{iter::successors, ops::Mul};
+use std::ops::Mul;
 use tracing::instrument;
 
 pub trait BulletproofDomainSeparator<G: CurveGroup> {
@@ -120,33 +120,6 @@ pub fn prove<G: CurveGroup>(
     Ok(prover_state.narg_string().to_vec())
 }
 
-#[instrument(skip_all, fields(n_proofs = proofs.len()), level = "debug")]
-pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
-    proofs: NonEmpty<Msm<G>>,
-    rng: &mut Rng,
-) -> ProofResult<()> {
-    let alpha = G::ScalarField::rand(rng);
-    let powers_of_alpha = successors(Some(G::ScalarField::one()), |state| Some(*state * alpha));
-    let combined_proof = proofs
-        .into_iter()
-        .zip(powers_of_alpha)
-        .map(|(mut proof, scalar)| {
-            proof.scale(scalar);
-            proof
-        })
-        .reduce(|mut acc, proof| {
-            acc.batch(proof);
-            acc
-        })
-        .expect("non-empty vec");
-    let (bases, scalars) = combined_proof.bases_and_scalars();
-    if G::msm_unchecked(&bases, &scalars).is_zero() {
-        Ok(())
-    } else {
-        Err(ProofError::InvalidProof)
-    }
-}
-
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
 pub fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
@@ -164,7 +137,7 @@ pub fn verify_aux<G: CurveGroup>(
         })
         .collect::<ProofResult<Vec<_>>>()?;
 
-    let mut msm = Msm::new(statement.witness_size);
+    let mut msm = Msm::new();
 
     {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
@@ -199,10 +172,12 @@ pub fn verify_aux<G: CurveGroup>(
         };
 
         msm.upsert(crs.u, a * b);
-        msm.upsert_batch(&crs.gs[0..n], &ss.into_iter().scale(a).collect::<Vec<_>>());
+        msm.upsert_batch(crs.gs[0..n].iter().copied().zip(ss.into_iter().scale(a)));
         msm.upsert_batch(
-            &crs.hs[0..n],
-            &ss_inverse.into_iter().scale(b).collect::<Vec<_>>(),
+            crs.hs[0..n]
+                .iter()
+                .copied()
+                .zip(ss_inverse.into_iter().scale(b)),
         );
     };
 
@@ -223,9 +198,9 @@ pub fn verify_aux<G: CurveGroup>(
             bases.push(right);
             scalars.push(x.inverse().expect("non-zero inverse").square());
         });
-        let bases = G::normalize_batch(&bases);
+        let bases: Vec<G::Affine> = G::normalize_batch(&bases);
         scalars = scalars.into_iter().scale(-G::ScalarField::one()).collect();
-        msm.upsert_batch(&bases, &scalars);
+        msm.upsert_batch(bases.into_iter().zip(scalars));
     };
 
     Ok(msm)
@@ -274,7 +249,9 @@ mod tests_proof {
     use super::*;
     use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
     use crate::ipa::types::{self as ipa_types, CrsSize};
+    use crate::msm::verify_batch_aux;
     use ark_secp256k1::{self, Projective};
+    use nonempty::NonEmpty;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
     use spongefish::DomainSeparator;
@@ -290,8 +267,6 @@ mod tests_proof {
           let witness: Witness<Projective> = Witness::rand(n, &mut rng);
           (crs, witness)
       })) {
-
-            println!("--- original ---");
 
             {
               let domain_separator = {
@@ -314,8 +289,6 @@ mod tests_proof {
               fast_verifier_state.ratchet().expect("failed to ratchet");
               verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
             }
-
-            println!("--- extended ---");
 
             {
 

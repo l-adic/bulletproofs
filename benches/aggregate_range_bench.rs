@@ -2,15 +2,28 @@ mod common;
 
 use crate::common::BoundedProofQueue;
 use ark_secp256k1::{Fr, Projective};
-use bulletproofs::range::{
-    aggregate::{
-        AggregatedRangeProofDomainSeparator, prove as aggregate_prove, verify as aggregate_verify,
+use bulletproofs::{
+    msm::verify_batch_aux,
+    range::{
+        aggregate::{
+            AggregatedRangeProofDomainSeparator, prove as aggregate_prove,
+            verify as aggregate_verify, verify_aux,
+        },
+        types::{self as range_types, CRS as RangeCRS, aggregate::Statement},
     },
-    types::{self as range_types, CRS as RangeCRS, aggregate::Statement},
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use nonempty::NonEmpty;
 use rand::rngs::OsRng;
-use spongefish::{DomainSeparator, codecs::arkworks_algebra::CommonGroupToUnit};
+use rayon::prelude::*;
+use spongefish::{DomainSeparator, ProofError, codecs::arkworks_algebra::CommonGroupToUnit};
+
+struct ProofData {
+    proof: Vec<u8>,
+    domain_separator: DomainSeparator,
+}
+
+const BATCH_SIZE: usize = 100;
 
 fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
     c: &mut Criterion,
@@ -38,7 +51,7 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
         )
     };
 
-    let mut proofs: BoundedProofQueue<(Statement<Projective>, Vec<u8>)> =
+    let mut proofs: BoundedProofQueue<(Statement<Projective>, ProofData)> =
         BoundedProofQueue::new(500);
 
     group.bench_with_input(BenchmarkId::new("prove", m), &m, |b, _| {
@@ -53,18 +66,49 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
             prover_state.public_points(&statement.v).unwrap();
             prover_state.ratchet().unwrap();
             let proof = aggregate_prove::<Projective, _>(prover_state, crs, &witness, rng).unwrap();
-            proofs.push((statement.clone(), proof));
+            let proof_data = ProofData {
+                proof: proof.clone(),
+                domain_separator: domain_separator.clone(),
+            };
+            proofs.push((statement, proof_data));
         })
     });
 
-    // Benchmark verify using proof from HashMap
     group.bench_with_input(BenchmarkId::new("verify", m), &m, |b, _| {
         b.iter(|| {
-            let (statement, proof) = proofs.choose(rng).unwrap();
-            let mut verifier_state = domain_separator.to_verifier_state(proof);
+            let (statement, proof_data) = proofs.choose(rng).unwrap();
+            let mut verifier_state = domain_separator.to_verifier_state(&proof_data.proof);
             verifier_state.public_points(&statement.v).unwrap();
             verifier_state.ratchet().unwrap();
-            aggregate_verify::<Projective>(&mut verifier_state, crs, statement).unwrap();
+            aggregate_verify::<Projective, _>(&mut verifier_state, crs, statement, rng).unwrap();
+        })
+    });
+
+    group.bench_with_input(BenchmarkId::new("verify_batch", m), &m, |b, _| {
+        b.iter(|| {
+            let selected_proofs = proofs.choose_multiple(rng, BATCH_SIZE);
+
+            let verifications = selected_proofs
+                .into_par_iter()
+                .map(
+                    |(
+                        statement,
+                        ProofData {
+                            proof,
+                            domain_separator,
+                        },
+                    )| {
+                        let mut verifier_state = domain_separator.to_verifier_state(proof);
+                        verifier_state.public_points(&statement.v)?;
+                        verifier_state.ratchet().unwrap();
+                        verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
+                    },
+                )
+                .collect::<Result<Vec<_>, ProofError>>()
+                .unwrap();
+
+            let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
+            verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
         })
     });
 
