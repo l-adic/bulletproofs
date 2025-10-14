@@ -89,11 +89,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
     let a_r: Vec<G::ScalarField> = a_l.iter().map(|x| *x - G::ScalarField::one()).collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
-    let a = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = gs.iter().cloned().chain(hs.iter().cloned()).collect();
-        let scalars: Vec<G::ScalarField> = a_l.iter().cloned().chain(a_r.iter().cloned()).collect();
-        G::msm_unchecked(&bases, &scalars)
-    };
+    let rho: G::ScalarField = UniformRand::rand(rng);
     let s_l = (0..n_bits)
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
@@ -101,19 +97,17 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
 
-    let rho: G::ScalarField = UniformRand::rand(rng);
-    let s = crs.h.mul(rho) + {
-        let bases = gs
-            .iter()
-            .cloned()
-            .chain(hs.iter().cloned())
-            .collect::<Vec<_>>();
-        let scalars = s_l
-            .iter()
-            .copied()
-            .chain(s_r.iter().copied())
-            .collect::<Vec<_>>();
-        G::msm_unchecked(&bases, &scalars)
+    let (a, s) = {
+        let bases: Vec<G::Affine> = gs.iter().cloned().chain(hs.iter().cloned()).collect();
+        let a_scalars: Vec<G::ScalarField> =
+            a_l.iter().cloned().chain(a_r.iter().cloned()).collect();
+        let s_scalars: Vec<G::ScalarField> =
+            s_l.iter().copied().chain(s_r.iter().copied()).collect();
+
+        rayon::join(
+            || crs.h.mul(alpha) + G::msm_unchecked(&bases, &a_scalars),
+            || crs.h.mul(rho) + G::msm_unchecked(&bases, &s_scalars),
+        )
     };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;

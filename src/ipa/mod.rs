@@ -110,8 +110,12 @@ pub fn prove<G: CurveGroup>(
         gs = new_gs;
         hs = new_hs;
 
-        witness.a = fold_scalars(a_left, a_right, alpha, alpha_inv);
-        witness.b = fold_scalars(b_left, b_right, alpha_inv, alpha);
+        let (new_a, new_b) = rayon::join(
+            || fold_scalars(a_left, a_right, alpha, alpha_inv),
+            || fold_scalars(b_left, b_right, alpha_inv, alpha),
+        );
+        witness.a = new_a;
+        witness.b = new_b;
 
         statement.p += left * alpha.square() + right * alpha_inv.square();
     }

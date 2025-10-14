@@ -327,32 +327,29 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
 
         let mut p_msm: Msm<G> = Msm::new();
 
-        //ww_l
-        p_msm.upsert_batch(
-            hs_prime
-                .iter()
-                .copied()
-                .zip(mat_mul_l(&z_vec, &circuit.w_l).scale(x)),
+        // Parallel matrix operations
+        let (ww_l_result, (ww_r_result, ww_o_result)) = rayon::join(
+            || mat_mul_l(&z_vec, &circuit.w_l).scale(x),
+            || {
+                rayon::join(
+                    || mat_mul_l(&z_vec, &circuit.w_r),
+                    || mat_mul_l(&z_vec, &circuit.w_o),
+                )
+            },
         );
+
+        //ww_l
+        p_msm.upsert_batch(hs_prime.iter().copied().zip(ww_l_result));
 
         //ww_r
         p_msm.upsert_batch(
-            gs.iter().copied().zip(
-                y_inv_vec
-                    .iter()
-                    .copied()
-                    .hadamard(mat_mul_l(&z_vec, &circuit.w_r))
-                    .scale(x),
-            ),
+            gs.iter()
+                .copied()
+                .zip(y_inv_vec.iter().copied().hadamard(ww_r_result).scale(x)),
         );
 
         //ww_o
-        p_msm.upsert_batch(
-            hs_prime
-                .iter()
-                .copied()
-                .zip(mat_mul_l(&z_vec, &circuit.w_o)),
-        );
+        p_msm.upsert_batch(hs_prime.iter().copied().zip(ww_o_result));
 
         let neg_y_vec = y_vec.iter().map(|yi| -*yi).collect::<Vec<_>>();
         p_msm.upsert_batch(hs_prime.iter().copied().zip(neg_y_vec));

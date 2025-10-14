@@ -78,12 +78,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let a_l: Vec<G::ScalarField> = {
         let mut res = Vec::with_capacity(n_bits * m);
-        for val in &witness.v {
+        witness.v.iter().for_each(|val| {
             let mut bits = bit_decomposition(*val);
             bits.resize(n_bits, G::ScalarField::zero());
             res.extend(bits);
-        }
-        assert!(res.len() == n_bits * m, "bad length");
+        });
         res
     };
 
@@ -94,19 +93,19 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         .collect();
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
-    let a = crs.h.mul(alpha) + {
-        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-        let scalars: Vec<G::ScalarField> = a_l.iter().chain(a_r.iter()).copied().collect();
-        G::msm_unchecked(&bases, &scalars)
-    };
+    let rho: G::ScalarField = UniformRand::rand(rng);
     let s_l: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
     let s_r: Vec<G::ScalarField> = (0..n_bits * m).map(|_| UniformRand::rand(rng)).collect();
 
-    let rho: G::ScalarField = UniformRand::rand(rng);
-    let s = crs.h.mul(rho) + {
+    let (a, s) = {
         let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-        let scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
-        G::msm_unchecked(&bases, &scalars)
+        let a_scalars: Vec<G::ScalarField> = a_l.iter().chain(a_r.iter()).copied().collect();
+        let s_scalars: Vec<G::ScalarField> = s_l.iter().chain(s_r.iter()).copied().collect();
+
+        rayon::join(
+            || crs.h.mul(alpha) + G::msm_unchecked(&bases, &a_scalars),
+            || crs.h.mul(rho) + G::msm_unchecked(&bases, &s_scalars),
+        )
     };
     prover_state.add_points(&[a, s])?;
     let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
