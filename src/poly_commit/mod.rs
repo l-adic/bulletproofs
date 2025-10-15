@@ -10,7 +10,6 @@ use ark_ff::{Field, Zero};
 use ark_poly::{
     Polynomial,
     polynomial::{self, DenseUVPolynomial},
-    univariate::DensePolynomial,
 };
 use spongefish::{ProofResult, ProverState, VerifierState};
 use std::marker::PhantomData;
@@ -33,12 +32,12 @@ impl<G: CurveGroup> CRS<G> {
 }
 
 #[derive(Debug)]
-pub struct Witness<G: CurveGroup> {
-    pub p: DensePolynomial<G::ScalarField>,
+pub struct Witness<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> {
+    pub p: P,
     _group: PhantomData<G>,
 }
 
-impl<G: CurveGroup> Witness<G> {
+impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
     pub fn statement(&self, crs: &CRS<G>, x: G::ScalarField) -> Statement<G> {
         let commitment = crs.commit(&self.p);
         let evaluation = self.p.evaluate(&x);
@@ -50,7 +49,7 @@ impl<G: CurveGroup> Witness<G> {
     }
 }
 
-impl<G: CurveGroup> Witness<G> {
+impl<G: CurveGroup> Witness<G, polynomial::univariate::DensePolynomial<G::ScalarField>> {
     pub fn rand<Rng: rand::Rng>(degree: usize, rng: &mut Rng) -> Self {
         let p = polynomial::univariate::DensePolynomial::rand(degree, rng);
         Witness {
@@ -72,7 +71,7 @@ fn powers_of_x<F: Field>(x: F) -> impl Iterator<Item = F> {
     })
 }
 
-impl<G: CurveGroup> Witness<G> {
+impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
     pub fn into_ipa_witness(&self, x: G::ScalarField) -> IpaWitness<G> {
         IpaWitness {
             a: self.p.coeffs().to_vec(),
@@ -100,18 +99,18 @@ impl<G: CurveGroup> Statement<G> {
     }
 }
 
-pub fn prove<G: CurveGroup>(
+pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-    witness: &Witness<G>,
+    witness: &Witness<G, P>,
 ) -> ProofResult<Vec<u8>> {
     let ipa_witness = witness.into_ipa_witness(statement.x);
     let ext_statement = statement.extended_statement(crs);
     extended::prove(prover_state, crs, &ext_statement, &ipa_witness)
 }
 
-pub fn verify_aux<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>>(
+pub fn verify_aux<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
@@ -135,6 +134,7 @@ mod tests_proof {
     use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
     use crate::ipa::types::CrsSize;
     use ark_ec::PrimeGroup;
+    use ark_poly::univariate::DensePolynomial;
     use ark_secp256k1::{self, Projective};
     use ark_std::UniformRand;
     use proptest::{prelude::*, test_runner::Config};
@@ -147,10 +147,11 @@ mod tests_proof {
       #[test]
       fn test_poly_comm_prove_verify_works((crs, witness, x) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
+          type Fr = <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
           let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
-          let witness: Witness<Projective> = Witness::rand((n - 1) as usize, &mut rng);
-          let x = <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField::rand(&mut rng);
+          let witness: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
+          let x = Fr::rand(&mut rng);
           (crs, witness, x)
       })) {
 
@@ -178,8 +179,8 @@ mod tests_proof {
 
 
               let mut verifier_state = domain_separator.to_verifier_state(&proof);
-              verifier_state.public_points(&[statement.commitment.g]).expect("cannot add statment");
-              verifier_state.public_scalars(&[statement.evaluation]).expect("cannot add statment");
+              verifier_state.public_points(&[statement.commitment.g]).expect("cannot add statement");
+              verifier_state.public_scalars(&[statement.evaluation]).expect("cannot add statement");
               verifier_state.ratchet().expect("failed to ratchet");
               verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
 
