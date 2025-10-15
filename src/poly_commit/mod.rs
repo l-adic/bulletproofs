@@ -1,6 +1,6 @@
 use crate::{
     ipa::{
-        extended,
+        extended::{self, ExtendedBulletproofDomainSeparator},
         types::{CRS, Witness as IpaWitness, extended::Statement as ExtendedIpaStatement},
     },
     msm::Msm,
@@ -11,8 +11,32 @@ use ark_poly::{
     Polynomial,
     polynomial::{self, DenseUVPolynomial},
 };
-use spongefish::{ProofResult, ProverState, VerifierState};
+use spongefish::{
+    DomainSeparator, ProofResult, ProverState, VerifierState,
+    codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator},
+};
 use std::marker::PhantomData;
+
+pub trait OpeningProofDomainSeparator<G: CurveGroup> {
+    fn opening_proof_statement(self) -> Self;
+    fn add_opening_proof(self, len: usize) -> Self;
+}
+
+impl<G> OpeningProofDomainSeparator<G> for DomainSeparator
+where
+    G: CurveGroup,
+    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
+{
+    fn opening_proof_statement(self) -> Self {
+        self.add_points(1, "commitment")
+            .add_scalars(1, "point")
+            .add_scalars(1, "evalutation")
+    }
+
+    fn add_opening_proof(self, len: usize) -> Self {
+        self.add_extended_bulletproof(len)
+    }
+}
 
 pub struct PolyCommit<G: CurveGroup> {
     pub g: G,
@@ -131,7 +155,6 @@ pub fn verify<G: CurveGroup>(
 #[cfg(test)]
 mod tests_proof {
     use super::*;
-    use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
     use crate::ipa::types::CrsSize;
     use ark_ec::PrimeGroup;
     use ark_poly::univariate::DensePolynomial;
@@ -161,9 +184,9 @@ mod tests_proof {
                 let domain_separator = DomainSeparator::new("test-poly-comm");
                 // add the IO of the bulletproof statement
                 let domain_separator =
-                    ExtendedBulletproofDomainSeparator::<Projective>::extended_bulletproof_statement(domain_separator).ratchet();
+                    OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator).ratchet();
                 // add the IO of the bulletproof protocol (the transcript)
-                ExtendedBulletproofDomainSeparator::<Projective>::add_extended_bulletproof(domain_separator, witness.size())
+                OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, witness.size())
               };
 
               let (statement, proof) = {
@@ -171,6 +194,7 @@ mod tests_proof {
                 let statement: Statement<Projective> = witness.statement(&crs, x);
                 let mut prover_state = domain_separator.to_prover_state();
                 prover_state.public_points(&[statement.commitment.g]).unwrap();
+                prover_state.public_scalars(&[statement.x]).unwrap();
                 prover_state.public_scalars(&[statement.evaluation]).unwrap();
                 prover_state.ratchet().unwrap();
                 let proof = prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
@@ -180,6 +204,7 @@ mod tests_proof {
 
               let mut verifier_state = domain_separator.to_verifier_state(&proof);
               verifier_state.public_points(&[statement.commitment.g]).expect("cannot add statement");
+              verifier_state.public_scalars(&[statement.x]).expect("cannot add statement");
               verifier_state.public_scalars(&[statement.evaluation]).expect("cannot add statement");
               verifier_state.ratchet().expect("failed to ratchet");
               verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
