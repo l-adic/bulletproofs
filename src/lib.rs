@@ -1,6 +1,7 @@
 pub mod circuit;
 pub mod ipa;
 pub mod msm;
+pub mod poly_commit;
 pub mod range;
 mod vector_ops;
 
