@@ -49,7 +49,7 @@ impl<G: CurveGroup> CRS<G> {
 pub struct Witness<G: CurveGroup> {
     pub a: Vec<G::ScalarField>,
     pub b: Vec<G::ScalarField>,
-    c: G::ScalarField,
+    pub c: G::ScalarField,
 }
 
 impl<G: CurveGroup> Witness<G> {
