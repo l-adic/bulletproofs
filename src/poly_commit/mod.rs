@@ -1,7 +1,7 @@
 pub mod types;
 
 use crate::{
-    poly_commit::types::{CRS, Statement, Witness},
+    poly_commit::types::{CRS, PolyCommit, Statement, Witness},
     vector_ops::inner_product,
 };
 use ark_ec::CurveGroup;
@@ -80,7 +80,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     statement: &Statement<G>,
     witness: &Witness<G, P>,
     rng: &mut Rng,
-) -> ProofResult<Vec<u8>> {
+) -> ProofResult<Assumption<G>> {
     let u: G = {
         let [u_coeff]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
         G::generator().mul(u_coeff)
@@ -131,7 +131,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     }
 
     prover_state.add_scalars(&[a[0], r])?;
-    Ok(prover_state.narg_string().to_vec())
+    Ok(Assumption { g: g[0].into() })
 }
 
 pub fn verify<G: CurveGroup>(
@@ -200,6 +200,91 @@ pub fn verify<G: CurveGroup>(
     Ok(())
 }
 
+pub struct HPoly<F> {
+    pub ui: Vec<F>,
+}
+
+impl<F: Field> HPoly<F> {
+    pub fn evaluate(&self, x: F) -> F {
+        self.ui
+            .iter()
+            .enumerate()
+            .map(|(i, &u)| u + u.inverse().unwrap() * x.pow(&[2_u64.pow((i as u32) - 1)]))
+            .product()
+    }
+}
+
+pub struct Assumption<G: CurveGroup> {
+    pub g: G,
+}
+
+pub struct Todo<G: CurveGroup>(Vec<(G, HPoly<G::ScalarField>)>);
+
+impl<G: CurveGroup> Todo<G> {
+    pub fn statement(&self, alpha: G::ScalarField, x: G::ScalarField) -> Statement<G> {
+        let alphas: Vec<G::ScalarField> = powers_of_x(alpha).take(self.0.len()).collect();
+        let g: G = alphas
+            .iter()
+            .zip(self.0.iter())
+            .map(|(alpha_i, (g_i, _))| g_i.mul(alpha_i))
+            .sum();
+        let evaluation: G::ScalarField = alphas
+            .iter()
+            .zip(self.0.iter())
+            .map(|(alpha_i, (_, h_poly))| h_poly.evaluate(x) * alpha_i)
+            .sum();
+        Statement {
+            commitment: PolyCommit { g },
+            x,
+            evaluation,
+        }
+    }
+}
+
+pub fn lazy_verify<G: CurveGroup>(
+    verifier_state: &mut VerifierState,
+    crs: &CRS<G>,
+    statement: &Statement<G>,
+    assumption: Assumption<G>,
+    mut todo: Todo<G>,
+) -> ProofResult<Todo<G>> {
+    let n = crs.size();
+    let log2_n = log2(n) as usize;
+
+    let u: G = {
+        let [u_coeff]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        G::generator().mul(u_coeff)
+    };
+
+    let p_prime = statement.commitment.g + u.mul(statement.evaluation);
+
+    let transcript = (0..log2_n)
+        .map(|_| {
+            let [left, right]: [G; 2] = verifier_state.next_points()?;
+            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+            Ok(((left, right), x))
+        })
+        .collect::<ProofResult<Vec<_>>>()?;
+
+    let q: G = transcript.iter().fold(p_prime, |acc, ((l_j, r_j), u_j)| {
+        let u_j_inv = u_j.inverse().expect("non zero u_j");
+        acc + l_j.mul(u_j.square()) + r_j.mul(u_j_inv.square())
+    });
+
+    let h_poly = HPoly {
+        ui: transcript.iter().map(|&(_, x)| x).collect(),
+    };
+
+    let b = h_poly.evaluate(statement.x);
+
+    let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+    let res = assumption.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
+
+    assert!(res.is_zero(), "Q equality");
+    todo.0.push((assumption.g, h_poly));
+    Ok(todo)
+}
+
 #[cfg(test)]
 mod tests_proof {
     use super::*;
@@ -213,53 +298,80 @@ mod tests_proof {
     use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
 
+    type Fr =
+        <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
+
+    pub fn prove_verify<G: CurveGroup>(
+        crs: &CRS<G>,
+        witness: &Witness<G, DensePolynomial<G::ScalarField>>,
+        statement: &Statement<G>,
+        rng: &mut OsRng,
+    ) {
+        let domain_separator = {
+            let domain_separator = DomainSeparator::new("test-poly-comm");
+            // add the IO of the bulletproof statement
+            let domain_separator =
+                OpeningProofDomainSeparator::<Projective>::opening_proof_statement(
+                    domain_separator,
+                )
+                .ratchet();
+            // add the IO of the bulletproof protocol (the transcript)
+            OpeningProofDomainSeparator::<Projective>::add_opening_proof(
+                domain_separator,
+                witness.size(),
+            )
+        };
+
+        let mut prover_state = domain_separator.to_prover_state();
+        let proof = {
+            prover_state
+                .public_points(&[statement.commitment.g])
+                .unwrap();
+            prover_state.public_scalars(&[statement.x]).unwrap();
+            prover_state
+                .public_scalars(&[statement.evaluation])
+                .unwrap();
+            prover_state.ratchet().unwrap();
+            prove(&mut prover_state, &crs, &statement, &witness, rng)
+                .expect("proof should be generated");
+            prover_state.narg_string()
+        };
+
+        let mut verifier_state = domain_separator.to_verifier_state(&proof);
+        verifier_state
+            .public_points(&[statement.commitment.g])
+            .expect("cannot add statement");
+        verifier_state
+            .public_scalars(&[statement.x])
+            .expect("cannot add statement");
+        verifier_state
+            .public_scalars(&[statement.evaluation])
+            .expect("cannot add statement");
+        verifier_state.ratchet().expect("failed to ratchet");
+        verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
+    }
+
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_poly_comm_prove_verify_works((crs, witness, x) in any::<CrsSize>().prop_map(|crs_size| {
+      fn test_poly_comm_prove_verify_works((crs, witness, statement) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
-          type Fr = <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
           let crs = <CRS<Projective>>::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
           let witness: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
           let x = Fr::rand(&mut rng);
-          (crs, witness, x)
+          let statement = witness.statement(&crs,x);
+          (crs, witness, statement)
       })) {
+            let mut rng = OsRng;
 
-            {
+            // works in normal case
+            prove_verify(&crs, &witness, &statement, &mut rng);
 
-              let mut rng = OsRng;
+            //can scale
+            let alpha = Fr::rand(&mut rng);
+            prove_verify(&crs, &witness.mul(alpha), &statement.mul(alpha), &mut rng);
 
-              let domain_separator = {
-                let domain_separator = DomainSeparator::new("test-poly-comm");
-                // add the IO of the bulletproof statement
-                let domain_separator =
-                    OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator).ratchet();
-                // add the IO of the bulletproof protocol (the transcript)
-                OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, witness.size())
-              };
-
-              let (statement, proof) = {
-
-                let statement: Statement<Projective> = witness.statement(&crs, x);
-                let mut prover_state = domain_separator.to_prover_state();
-                prover_state.public_points(&[statement.commitment.g]).unwrap();
-                prover_state.public_scalars(&[statement.x]).unwrap();
-                prover_state.public_scalars(&[statement.evaluation]).unwrap();
-                prover_state.ratchet().unwrap();
-                let proof = prove(&mut prover_state, &crs, &statement, &witness, &mut rng).expect("proof should be generated");
-                (statement, proof)
-              };
-
-
-              let mut verifier_state = domain_separator.to_verifier_state(&proof);
-              verifier_state.public_points(&[statement.commitment.g]).expect("cannot add statement");
-              verifier_state.public_scalars(&[statement.x]).expect("cannot add statement");
-              verifier_state.public_scalars(&[statement.evaluation]).expect("cannot add statement");
-              verifier_state.ratchet().expect("failed to ratchet");
-              verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
-
-            }
 
       }
     }

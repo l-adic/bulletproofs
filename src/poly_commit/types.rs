@@ -2,6 +2,7 @@ use ark_ec::CurveGroup;
 use ark_ff::Zero;
 use ark_poly::{DenseUVPolynomial, polynomial};
 use std::marker::PhantomData;
+use std::ops::Mul;
 
 use crate::ipa::types::CrsSize;
 
@@ -31,6 +32,14 @@ pub struct PolyCommit<G: CurveGroup> {
     pub g: G,
 }
 
+impl<G: CurveGroup> PolyCommit<G> {
+    pub fn mul(self, alpha: G::ScalarField) -> Self {
+        Self {
+            g: self.g.mul(alpha),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Witness<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> {
     pub p: P,
@@ -51,6 +60,14 @@ impl<G: CurveGroup> Witness<G, polynomial::univariate::DensePolynomial<G::Scalar
             _group: PhantomData,
         }
     }
+
+    pub fn mul(self, alpha: G::ScalarField) -> Self {
+        Self {
+            p: self.p.mul(alpha),
+            r: self.r * alpha,
+            _group: self._group,
+        }
+    }
 }
 
 impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
@@ -64,6 +81,16 @@ pub struct Statement<G: CurveGroup> {
     pub commitment: PolyCommit<G>,
     pub x: G::ScalarField,
     pub evaluation: G::ScalarField,
+}
+
+impl<G: CurveGroup> Statement<G> {
+    pub fn mul(self, alpha: G::ScalarField) -> Self {
+        Self {
+            commitment: self.commitment.mul(alpha),
+            x: self.x,
+            evaluation: self.evaluation * alpha,
+        }
+    }
 }
 
 impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
