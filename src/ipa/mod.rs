@@ -145,8 +145,9 @@ pub fn verify_aux<G: CurveGroup>(
 
     {
         let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+        msm.upsert(crs.u, a * b);
 
-        let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|(_, x)| *x).collect();
+        let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|&(_, x)| x).collect();
         let challenge_inverses = {
             let mut inverses = challenge_powers.clone();
             batch_inversion(&mut inverses);
@@ -175,7 +176,6 @@ pub fn verify_aux<G: CurveGroup>(
             ss_inverse
         };
 
-        msm.upsert(crs.u, a * b);
         msm.upsert_batch(crs.gs[0..n].iter().copied().zip(ss.into_iter().scale(a)));
         msm.upsert_batch(
             crs.hs[0..n]

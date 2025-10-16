@@ -1,21 +1,22 @@
+pub mod types;
+
 use crate::{
-    ipa::{
-        extended::{self, ExtendedBulletproofDomainSeparator},
-        types::{CRS, Witness as IpaWitness, extended::Statement as ExtendedIpaStatement},
-    },
-    msm::Msm,
+    poly_commit::types::{CRS, Statement, Witness},
+    vector_ops::inner_product,
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, Zero};
-use ark_poly::{
-    Polynomial,
-    polynomial::{self, DenseUVPolynomial},
-};
+use ark_ff::{Field, UniformRand, batch_inversion};
+use ark_poly::polynomial::DenseUVPolynomial;
+use ark_std::log2;
+use rayon::prelude::*;
 use spongefish::{
     DomainSeparator, ProofResult, ProverState, VerifierState,
-    codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator},
+    codecs::arkworks_algebra::{
+        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
+        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
+    },
 };
-use std::marker::PhantomData;
+use std::ops::Mul;
 
 pub trait OpeningProofDomainSeparator<G: CurveGroup> {
     fn opening_proof_statement(self) -> Self;
@@ -33,57 +34,14 @@ where
             .add_scalars(1, "evalutation")
     }
 
-    fn add_opening_proof(self, len: usize) -> Self {
-        self.add_extended_bulletproof(len)
-    }
-}
-
-pub struct PolyCommit<G: CurveGroup> {
-    pub g: G,
-}
-
-impl<G: CurveGroup> CRS<G> {
-    fn commit<P: DenseUVPolynomial<G::ScalarField>>(&self, f: &P) -> PolyCommit<G> {
-        assert!(
-            f.degree() <= self.size(),
-            "Cannot commit to polynomial of degree higher than the crs size"
-        );
-        let mut coeffs = f.coeffs().to_vec();
-        coeffs.resize(self.size(), G::ScalarField::zero());
-        let g = G::msm_unchecked(&self.gs, f.coeffs());
-        PolyCommit { g }
-    }
-}
-
-#[derive(Debug)]
-pub struct Witness<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> {
-    pub p: P,
-    _group: PhantomData<G>,
-}
-
-impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
-    pub fn statement(&self, crs: &CRS<G>, x: G::ScalarField) -> Statement<G> {
-        let commitment = crs.commit(&self.p);
-        let evaluation = self.p.evaluate(&x);
-        Statement {
-            commitment,
-            evaluation,
-            x,
+    fn add_opening_proof(mut self, len: usize) -> Self {
+        self = self.challenge_scalars(1, "u_coeff");
+        for _ in 0..log2(len) {
+            self = self
+                .add_points(2, "round-message")
+                .challenge_scalars(1, "challenge");
         }
-    }
-}
-
-impl<G: CurveGroup> Witness<G, polynomial::univariate::DensePolynomial<G::ScalarField>> {
-    pub fn rand<Rng: rand::Rng>(degree: usize, rng: &mut Rng) -> Self {
-        let p = polynomial::univariate::DensePolynomial::rand(degree, rng);
-        Witness {
-            p,
-            _group: PhantomData,
-        }
-    }
-
-    pub fn size(&self) -> usize {
-        self.p.degree() + 1
+        self.add_scalars(2, "final-message")
     }
 }
 
@@ -95,52 +53,85 @@ fn powers_of_x<F: Field>(x: F) -> impl Iterator<Item = F> {
     })
 }
 
-impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
-    pub fn into_ipa_witness(&self, x: G::ScalarField) -> IpaWitness<G> {
-        IpaWitness {
-            a: self.p.coeffs().to_vec(),
-            b: powers_of_x(x).take(self.p.coeffs().len()).collect(),
-            c: self.p.evaluate(&x),
-        }
-    }
+fn fold_scalars<Fr: Field>(left: &[Fr], x: Fr, right: &[Fr], y: Fr) -> Vec<Fr> {
+    left.par_iter()
+        .zip(right)
+        .map(|(l, r)| *l * x + *r * y)
+        .collect::<Vec<_>>()
 }
 
-pub struct Statement<G: CurveGroup> {
-    pub commitment: PolyCommit<G>,
-    pub x: G::ScalarField,
-    pub evaluation: G::ScalarField,
+fn fold_generators<G: CurveGroup>(
+    left: &[G::Affine],
+    x: G::ScalarField,
+    right: &[G::Affine],
+    y: G::ScalarField,
+) -> Vec<G::Affine> {
+    let gs: Vec<G> = left
+        .par_iter()
+        .zip(right)
+        .map(|(l, r)| l.mul(x) + r.mul(y))
+        .collect();
+    G::normalize_batch(&gs)
 }
 
-impl<G: CurveGroup> Statement<G> {
-    pub fn extended_statement(&self, crs: &CRS<G>) -> ExtendedIpaStatement<G> {
-        let xs: Vec<G::ScalarField> = powers_of_x(self.x).take(crs.hs.len()).collect();
-        let h = G::msm_unchecked(&crs.hs, &xs);
-        ExtendedIpaStatement {
-            p: self.commitment.g.add(h),
-            c: self.evaluation,
-            witness_size: crs.size(),
-        }
-    }
-}
-
-pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>>(
+pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     witness: &Witness<G, P>,
+    rng: &mut Rng,
 ) -> ProofResult<Vec<u8>> {
-    let ipa_witness = witness.into_ipa_witness(statement.x);
-    let ext_statement = statement.extended_statement(crs);
-    extended::prove(prover_state, crs, &ext_statement, &ipa_witness)
-}
+    let u: G = {
+        let [u_coeff]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        G::generator().mul(u_coeff)
+    };
 
-pub fn verify_aux<G: CurveGroup>(
-    verifier_state: &mut VerifierState,
-    crs: &CRS<G>,
-    statement: &Statement<G>,
-) -> ProofResult<Msm<G>> {
-    let ext_statement = statement.extended_statement(crs);
-    extended::verify_aux(verifier_state, crs, &ext_statement)
+    let mut r = witness.r;
+
+    let mut n = witness.size();
+    let mut g = crs.gs.clone();
+    let mut a: Vec<G::ScalarField> = witness.p.coeffs().to_vec();
+    let mut b: Vec<G::ScalarField> = powers_of_x(statement.x).take(n).collect();
+
+    while n != 1 {
+        n /= 2;
+        let (g_lo, g_hi) = g.split_at(n);
+        let (a_lo, a_hi) = a.split_at(n);
+        let (b_lo, b_hi) = b.split_at(n);
+
+        let (l_j, r_j) = (G::ScalarField::rand(rng), G::ScalarField::rand(rng));
+        let (left_j, right_j): (G, G) = rayon::join(
+            || {
+                G::msm_unchecked(g_hi, a_lo)
+                    + crs.h.mul(l_j)
+                    + u.mul(inner_product::<_, _, G::ScalarField>(a_lo, b_hi))
+            },
+            || {
+                G::msm_unchecked(g_lo, a_hi)
+                    + crs.h.mul(r_j)
+                    + u.mul(inner_product::<_, _, G::ScalarField>(a_hi, b_lo))
+            },
+        );
+
+        prover_state.add_points(&[left_j, right_j])?;
+
+        let [u_j]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let u_j_inv = u_j.inverse().expect("non-zero u_j");
+
+        let (new_a, new_b) = rayon::join(
+            || fold_scalars(a_hi, u_j_inv, a_lo, u_j),
+            || fold_scalars(b_lo, u_j_inv, b_hi, u_j),
+        );
+        a = new_a;
+        b = new_b;
+
+        g = fold_generators::<G>(g_lo, u_j_inv, g_hi, u_j);
+
+        r += l_j * u_j.square() + r_j * u_j_inv.square();
+    }
+
+    prover_state.add_scalars(&[a[0], r])?;
+    Ok(prover_state.narg_string().to_vec())
 }
 
 pub fn verify<G: CurveGroup>(
@@ -148,8 +139,65 @@ pub fn verify<G: CurveGroup>(
     crs: &CRS<G>,
     statement: &Statement<G>,
 ) -> ProofResult<()> {
-    let ext_statement = statement.extended_statement(crs);
-    extended::verify(verifier_state, crs, &ext_statement)
+    let n = crs.size();
+    let log2_n = log2(n) as usize;
+
+    let u: G = {
+        let [u_coeff]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        G::generator().mul(u_coeff)
+    };
+
+    let p_prime = statement.commitment.g + u.mul(statement.evaluation);
+
+    let transcript = (0..log2_n)
+        .map(|_| {
+            let [left, right]: [G; 2] = verifier_state.next_points()?;
+            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+            Ok(((left, right), x))
+        })
+        .collect::<ProofResult<Vec<_>>>()?;
+
+    let q: G = transcript.iter().fold(p_prime, |acc, ((l_j, r_j), u_j)| {
+        let u_j_inv = u_j.inverse().expect("non zero u_j");
+        acc + l_j.mul(u_j.square()) + r_j.mul(u_j_inv.square())
+    });
+
+    let ss: Vec<G::ScalarField> = {
+        let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|&(_, x)| x).collect();
+        let challenge_inverses = {
+            let mut inverses = challenge_powers.clone();
+            batch_inversion(&mut inverses);
+            inverses
+        };
+
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                (0..log2_n)
+                    .map(|j| {
+                        let idx = log2_n - j - 1;
+                        if (i >> j) & 1 == 1 {
+                            challenge_powers[idx]
+                        } else {
+                            challenge_inverses[idx]
+                        }
+                    })
+                    .product()
+            })
+            .collect()
+    };
+
+    let g = G::msm_unchecked(&crs.gs, &ss);
+    let b = {
+        let b = powers_of_x(statement.x).take(n);
+        inner_product(ss, b)
+    };
+
+    let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+    let res = g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
+
+    assert!(res.is_zero(), "Q equality");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -171,7 +219,7 @@ mod tests_proof {
       fn test_poly_comm_prove_verify_works((crs, witness, x) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
           type Fr = <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
-          let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
+          let crs = <CRS<Projective>>::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
           let witness: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
           let x = Fr::rand(&mut rng);
@@ -179,6 +227,8 @@ mod tests_proof {
       })) {
 
             {
+
+              let mut rng = OsRng;
 
               let domain_separator = {
                 let domain_separator = DomainSeparator::new("test-poly-comm");
@@ -197,7 +247,7 @@ mod tests_proof {
                 prover_state.public_scalars(&[statement.x]).unwrap();
                 prover_state.public_scalars(&[statement.evaluation]).unwrap();
                 prover_state.ratchet().unwrap();
-                let proof = prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
+                let proof = prove(&mut prover_state, &crs, &statement, &witness, &mut rng).expect("proof should be generated");
                 (statement, proof)
               };
 
