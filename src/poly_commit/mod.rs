@@ -16,7 +16,7 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::ops::Mul;
+use std::ops::{Add, Mul};
 
 pub trait OpeningProofDomainSeparator<G: CurveGroup> {
     fn opening_proof_statement(self) -> Self;
@@ -131,7 +131,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     }
 
     prover_state.add_scalars(&[a[0], r])?;
-    Ok(Assumption { g: g[0].into() })
+    Ok(Assumption(PolyCommit { g: g[0].into() }))
 }
 
 pub fn verify<G: CurveGroup>(
@@ -209,36 +209,34 @@ impl<F: Field> HPoly<F> {
         self.ui
             .iter()
             .enumerate()
-            .map(|(i, &u)| u + u.inverse().unwrap() * x.pow(&[2_u64.pow((i as u32) - 1)]))
+            .map(|(i, &u)| u + u.inverse().unwrap() * x.pow([2_u64.pow((i as u32) - 1)]))
             .product()
     }
 }
 
-pub struct Assumption<G: CurveGroup> {
-    pub g: G,
+pub struct Assumption<G: CurveGroup>(PolyCommit<G>);
+
+pub struct Todo<G: CurveGroup> {
+    pub h_poly: HPoly<G::ScalarField>,
+    pub g: PolyCommit<G>,
 }
 
-pub struct Todo<G: CurveGroup>(Vec<(G, HPoly<G::ScalarField>)>);
-
-impl<G: CurveGroup> Todo<G> {
-    pub fn statement(&self, alpha: G::ScalarField, x: G::ScalarField) -> Statement<G> {
-        let alphas: Vec<G::ScalarField> = powers_of_x(alpha).take(self.0.len()).collect();
-        let g: G = alphas
-            .iter()
-            .zip(self.0.iter())
-            .map(|(alpha_i, (g_i, _))| g_i.mul(alpha_i))
-            .sum();
-        let evaluation: G::ScalarField = alphas
-            .iter()
-            .zip(self.0.iter())
-            .map(|(alpha_i, (_, h_poly))| h_poly.evaluate(x) * alpha_i)
-            .sum();
-        Statement {
-            commitment: PolyCommit { g },
+pub fn fold_todos<G: CurveGroup>(
+    todos: &[Todo<G>],
+    alpha: G::ScalarField,
+    x: G::ScalarField,
+) -> Statement<G> {
+    todos
+        .iter()
+        .map(|Todo { h_poly, g }| Statement {
+            commitment: *g,
+            evaluation: h_poly.evaluate(x),
             x,
-            evaluation,
-        }
-    }
+        })
+        .zip(powers_of_x(alpha))
+        .map(|(s, alpha_i)| s.mul(alpha_i))
+        .reduce(Add::<Statement<G>>::add)
+        .expect("Non empty statement list")
 }
 
 pub fn lazy_verify<G: CurveGroup>(
@@ -246,8 +244,8 @@ pub fn lazy_verify<G: CurveGroup>(
     crs: &CRS<G>,
     statement: &Statement<G>,
     assumption: Assumption<G>,
-    mut todo: Todo<G>,
-) -> ProofResult<Todo<G>> {
+    mut todos: Vec<Todo<G>>,
+) -> ProofResult<Vec<Todo<G>>> {
     let n = crs.size();
     let log2_n = log2(n) as usize;
 
@@ -278,11 +276,15 @@ pub fn lazy_verify<G: CurveGroup>(
     let b = h_poly.evaluate(statement.x);
 
     let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
-    let res = assumption.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
+    let res = assumption.0.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
 
     assert!(res.is_zero(), "Q equality");
-    todo.0.push((assumption.g, h_poly));
-    Ok(todo)
+    let todo = Todo {
+        g: assumption.0,
+        h_poly,
+    };
+    todos.push(todo);
+    Ok(todos)
 }
 
 #[cfg(test)]
@@ -297,6 +299,7 @@ mod tests_proof {
     use rand::rngs::OsRng;
     use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
+    use std::ops::Add;
 
     type Fr =
         <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
@@ -332,12 +335,12 @@ mod tests_proof {
                 .public_scalars(&[statement.evaluation])
                 .unwrap();
             prover_state.ratchet().unwrap();
-            prove(&mut prover_state, &crs, &statement, &witness, rng)
+            prove(&mut prover_state, crs, statement, witness, rng)
                 .expect("proof should be generated");
             prover_state.narg_string()
         };
 
-        let mut verifier_state = domain_separator.to_verifier_state(&proof);
+        let mut verifier_state = domain_separator.to_verifier_state(proof);
         verifier_state
             .public_points(&[statement.commitment.g])
             .expect("cannot add statement");
@@ -348,29 +351,35 @@ mod tests_proof {
             .public_scalars(&[statement.evaluation])
             .expect("cannot add statement");
         verifier_state.ratchet().expect("failed to ratchet");
-        verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
+        verify(&mut verifier_state, crs, statement).expect("proof should verify");
     }
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_poly_comm_prove_verify_works((crs, witness, statement) in any::<CrsSize>().prop_map(|crs_size| {
+      fn test_poly_comm_prove_verify_works((crs, witness1, witness2, statement1, statement2) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
           let crs = <CRS<Projective>>::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
-          let witness: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
+          let witness1: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
+          let witness2: Witness<Projective, DensePolynomial<Fr>> = Witness::rand((n - 1) as usize, &mut rng);
           let x = Fr::rand(&mut rng);
-          let statement = witness.statement(&crs,x);
-          (crs, witness, statement)
+          let statement1 = witness1.statement(&crs,x);
+          let statement2 = witness2.statement(&crs,x);
+          (crs, witness1, witness2, statement1, statement2)
       })) {
             let mut rng = OsRng;
 
             // works in normal case
-            prove_verify(&crs, &witness, &statement, &mut rng);
+            prove_verify(&crs, &witness1, &statement1, &mut rng);
 
             //can scale
-            let alpha = Fr::rand(&mut rng);
-            prove_verify(&crs, &witness.mul(alpha), &statement.mul(alpha), &mut rng);
+            let alpha1 = Fr::rand(&mut rng);
+            let alpha2 = Fr::rand(&mut rng);
+            let witness = witness1.mul(alpha1).add(witness2.mul(alpha2));
+            let statement = statement1.mul(alpha1).add(statement2.mul(alpha2));
+            assert_eq!(statement, witness.statement(&crs, statement1.x), "statements are linear");
+            prove_verify(&crs, &witness, &statement, &mut rng);
 
 
       }

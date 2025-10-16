@@ -2,7 +2,7 @@ use ark_ec::CurveGroup;
 use ark_ff::Zero;
 use ark_poly::{DenseUVPolynomial, polynomial};
 use std::marker::PhantomData;
-use std::ops::Mul;
+use std::ops::{Add, Mul};
 
 use crate::ipa::types::CrsSize;
 
@@ -27,12 +27,13 @@ impl<G: CurveGroup> CRS<G> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PolyCommit<G: CurveGroup> {
     pub g: G,
 }
 
 impl<G: CurveGroup> PolyCommit<G> {
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, alpha: G::ScalarField) -> Self {
         Self {
             g: self.g.mul(alpha),
@@ -40,7 +41,17 @@ impl<G: CurveGroup> PolyCommit<G> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+impl<G: CurveGroup> Add for PolyCommit<G> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        PolyCommit {
+            g: self.g + other.g,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Witness<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> {
     pub p: P,
     pub r: G::ScalarField,
@@ -61,10 +72,22 @@ impl<G: CurveGroup> Witness<G, polynomial::univariate::DensePolynomial<G::Scalar
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, alpha: G::ScalarField) -> Self {
         Self {
             p: self.p.mul(alpha),
             r: self.r * alpha,
+            _group: self._group,
+        }
+    }
+}
+
+impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Add for Witness<G, P> {
+    type Output = Witness<G, P>;
+    fn add(self, other: Self) -> Self {
+        Self {
+            p: self.p + other.p,
+            r: self.r + other.r,
             _group: self._group,
         }
     }
@@ -76,7 +99,7 @@ impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Statement<G: CurveGroup> {
     pub commitment: PolyCommit<G>,
     pub x: G::ScalarField,
@@ -84,11 +107,27 @@ pub struct Statement<G: CurveGroup> {
 }
 
 impl<G: CurveGroup> Statement<G> {
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, alpha: G::ScalarField) -> Self {
         Self {
             commitment: self.commitment.mul(alpha),
             x: self.x,
             evaluation: self.evaluation * alpha,
+        }
+    }
+}
+
+impl<G: CurveGroup> Add for Statement<G> {
+    type Output = Statement<G>;
+    fn add(self, other: Self) -> Self {
+        assert!(
+            self.x == other.x,
+            "Can only add Statements where the evaluation points match"
+        );
+        Self {
+            commitment: self.commitment + other.commitment,
+            x: self.x,
+            evaluation: self.evaluation + other.evaluation,
         }
     }
 }
