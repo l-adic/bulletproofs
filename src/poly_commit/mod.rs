@@ -486,10 +486,10 @@ mod tests_proof {
       })) {
             let mut rng = OsRng;
             let domain_separator = DomainSeparator::new("test-poly-comm");
+            let domain_separator = OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator.clone()).ratchet();
+            let domain_separator = OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size());
 
             let proofs = points.iter().zip(witnesses.iter()).map(|(&x, witness)| {
-                let domain_separator = OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator.clone()).ratchet();
-                let domain_separator = OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size());
                 let mut prover_state = domain_separator.to_prover_state();
                 let statement = witness.statement(&crs, x);
                 prover_state
@@ -501,10 +501,10 @@ mod tests_proof {
                     .unwrap();
                 prover_state.ratchet().unwrap();
                 let proof = prove(&mut prover_state, &crs, &statement, witness, &mut rng)?;
-                Ok((domain_separator, prover_state.narg_string().to_vec(), statement, proof))
+                Ok((prover_state.narg_string().to_vec(), statement, proof))
             }).collect::<Result<Vec<_>, ProofError>>()?;
 
-            let verifier_todos = proofs.iter().try_fold(Vec::new(), |todos, (domain_separator, proof, statement, prover_todo)| {
+            let verifier_todos = proofs.iter().try_fold(Vec::new(), |todos, (proof, statement, prover_todo)| {
                 let mut verifier_state = domain_separator.to_verifier_state(proof);
                 verifier_state
                     .public_points(&[statement.commitment.g])
@@ -519,7 +519,7 @@ mod tests_proof {
                 lazy_verify(&mut verifier_state, &crs, statement, prover_todo.g, todos)
             })?;
 
-            let prover_todos: Vec<Todo<Projective>> = proofs.iter().map(|(_,_,_,todo)| todo).cloned().collect();
+            let prover_todos: Vec<Todo<Projective>> = proofs.iter().map(|(_,_,todo)| todo).cloned().collect();
 
             assert_eq!(prover_todos, verifier_todos, "Prover todos don't match verifier todos");
 

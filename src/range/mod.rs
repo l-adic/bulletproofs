@@ -351,7 +351,11 @@ mod tests_range {
         let mut rng = OsRng;
         let crs: CRS<Projective> = CRS::rand(n, &mut rng);
 
-        let domain_separator = DomainSeparator::new("test-range-proof-batch");
+        let domain_separator = {
+            let domain_separator = DomainSeparator::new("test-range-proof-batch");
+            let domain_separator = RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator.clone()).ratchet();
+            RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
+        };
 
         let witnesses = (0..4).map(|_| {
             let max_value = (1u128 << n) - 1;
@@ -362,16 +366,14 @@ mod tests_range {
         let statements = witnesses.iter().map(|w| (w, Statement::new(&crs, w))).collect::<Vec<_>>();
 
         let proofs = statements.par_iter().map(|(witness, statement)| {
-            let domain_separator = RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator.clone()).ratchet();
-            let domain_separator = RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n);
             let mut prover_state = domain_separator.to_prover_state();
             prover_state.public_points(&[statement.v])?;
             prover_state.ratchet().unwrap();
             let proof = prove(prover_state, &crs, witness, &mut OsRng)?;
-            Ok((statement, proof, domain_separator))
+            Ok((statement, proof))
         }).collect::<Result<Vec<_>, ProofError>>()?;
 
-        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof)| {
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.v])?;
             verifier_state.ratchet().unwrap();

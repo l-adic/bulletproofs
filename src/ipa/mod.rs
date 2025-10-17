@@ -331,28 +331,31 @@ mod tests_proof {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_batch_prove_verify_works((crs, witness) in any::<CrsSize>().prop_map(|crs_size| {
+      fn test_batch_prove_verify_works((crs, witness, witness_size) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
           let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
+          let witness_size = n as usize;
           let witnesses = (0..4).map(|_| Witness::rand(n, &mut rng)).collect::<Vec<_>>();
-          (crs, witnesses)
+          (crs, witnesses, witness_size)
       })) {
 
-        let domain_separator = DomainSeparator::new("test-ipa-batch");
+        let domain_separator = {
+            let domain_separator = DomainSeparator::new("test-ipa-batch");
+            let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
+            BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness_size)
+        };
         let statements = witness.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
 
         let proofs = statements.par_iter().map(|(witness, statement)| {
-            let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
-            let domain_separator = BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size());
             let mut prover_state = domain_separator.to_prover_state();
             prover_state.public_points(&[statement.p])?;
             prover_state.ratchet().unwrap();
             let proof = prove(&mut prover_state, &crs, *statement, witness)?;
-            Ok((statement, proof, domain_separator))
+            Ok((statement, proof))
         }).collect::<Result<Vec<_>, ProofError>>()?;
 
-        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof, domain_separator)| {
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof)| {
             let mut verifier_state = domain_separator.to_verifier_state(proof);
             verifier_state.public_points(&[statement.p])?;
             verifier_state.ratchet().unwrap();

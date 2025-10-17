@@ -453,8 +453,6 @@ mod tests {
         ) {
             let mut rng = OsRng;
 
-            let domain_separator = DomainSeparator::new("test-circuit-proof-batch");
-
             let circuits_and_witnesses = (0..4).map(|_| {
                 types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng)
             }).collect::<Vec<_>>();
@@ -466,17 +464,21 @@ mod tests {
                 (circuit, witness, Statement::new(&crs, witness))
             }).collect::<Vec<_>>();
 
+            let domain_separator = {
+                let domain_separator = DomainSeparator::new("test-circuit-proof-batch");
+                let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(domain_separator.clone(), n).ratchet();
+                CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n)
+            };
+
             let proofs = statements.par_iter().map(|(circuit, witness, statement)| {
-                let domain_separator = CircuitProofDomainSeparator::<Projective>::circuit_proof_statement(domain_separator.clone(), statement.v.len()).ratchet();
-                let domain_separator = CircuitProofDomainSeparator::<Projective>::add_circuit_proof(domain_separator, n);
                 let mut prover_state = domain_separator.to_prover_state();
                 prover_state.public_points(&statement.v)?;
                 prover_state.ratchet().unwrap();
                 let proof = prove(&mut prover_state, &crs, circuit, witness, &mut OsRng)?;
-                Ok((circuit, statement, proof, domain_separator))
+                Ok((circuit, statement, proof))
             }).collect::<Result<Vec<_>, ProofError>>()?;
 
-            let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(circuit, statement, proof, domain_separator)| {
+            let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(circuit, statement, proof)| {
                 let mut verifier_state = domain_separator.to_verifier_state(proof);
                 verifier_state.public_points(&statement.v)?;
                 verifier_state.ratchet().unwrap();
