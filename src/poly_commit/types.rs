@@ -55,7 +55,7 @@ impl<G: CurveGroup> Add for PolyCommit<G> {
 pub struct Witness<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> {
     pub p: P,
     pub r: G::ScalarField,
-    _group: PhantomData<G>,
+    pub _group: PhantomData<G>,
 }
 
 impl<G: CurveGroup> Witness<G, polynomial::univariate::DensePolynomial<G::ScalarField>> {

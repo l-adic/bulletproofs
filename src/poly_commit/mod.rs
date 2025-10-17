@@ -5,8 +5,8 @@ use crate::{
     vector_ops::inner_product,
 };
 use ark_ec::CurveGroup;
-use ark_ff::{Field, UniformRand, batch_inversion};
-use ark_poly::polynomial::DenseUVPolynomial;
+use ark_ff::{Field, UniformRand, Zero, batch_inversion};
+use ark_poly::{polynomial::DenseUVPolynomial, univariate::DensePolynomial};
 use ark_std::log2;
 use rayon::prelude::*;
 use spongefish::{
@@ -16,7 +16,7 @@ use spongefish::{
         GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
     },
 };
-use std::ops::{Add, Mul};
+use std::{marker::PhantomData, ops::Mul};
 
 pub trait OpeningProofDomainSeparator<G: CurveGroup> {
     fn opening_proof_statement(self) -> Self;
@@ -80,7 +80,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     statement: &Statement<G>,
     witness: &Witness<G, P>,
     rng: &mut Rng,
-) -> ProofResult<Assumption<G>> {
+) -> ProofResult<Todo<G>> {
     let u: G = {
         let [u_coeff]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
         G::generator().mul(u_coeff)
@@ -92,6 +92,8 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     let mut g = crs.gs.clone();
     let mut a: Vec<G::ScalarField> = witness.p.coeffs().to_vec();
     let mut b: Vec<G::ScalarField> = powers_of_x(statement.x).take(n).collect();
+
+    let mut ui: Vec<G::ScalarField> = Vec::with_capacity(log2(n) as usize);
 
     while n != 1 {
         n /= 2;
@@ -116,6 +118,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
         prover_state.add_points(&[left_j, right_j])?;
 
         let [u_j]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        ui.push(u_j);
         let u_j_inv = u_j.inverse().expect("non-zero u_j");
 
         let (new_a, new_b) = rayon::join(
@@ -131,7 +134,17 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
     }
 
     prover_state.add_scalars(&[a[0], r])?;
-    Ok(Assumption(PolyCommit { g: g[0].into() }))
+    {
+        let h_poly = HPoly { ui: ui.clone() };
+        let ss = h_poly.coeffs();
+        let g_comp = G::msm_unchecked(&crs.gs, &ss);
+        assert_eq!(g[0], g_comp.into_affine(), "Gs NEQ")
+    }
+
+    Ok(Todo {
+        g: PolyCommit { g: g[0].into() },
+        h_poly: HPoly { ui },
+    })
 }
 
 pub fn verify<G: CurveGroup>(
@@ -163,28 +176,10 @@ pub fn verify<G: CurveGroup>(
     });
 
     let ss: Vec<G::ScalarField> = {
-        let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|&(_, x)| x).collect();
-        let challenge_inverses = {
-            let mut inverses = challenge_powers.clone();
-            batch_inversion(&mut inverses);
-            inverses
+        let h_poly = HPoly {
+            ui: transcript.iter().map(|&(_, x)| x).collect(),
         };
-
-        (0..n)
-            .into_par_iter()
-            .map(|i| {
-                (0..log2_n)
-                    .map(|j| {
-                        let idx = log2_n - j - 1;
-                        if (i >> j) & 1 == 1 {
-                            challenge_powers[idx]
-                        } else {
-                            challenge_inverses[idx]
-                        }
-                    })
-                    .product()
-            })
-            .collect()
+        h_poly.coeffs()
     };
 
     let g = G::msm_unchecked(&crs.gs, &ss);
@@ -200,6 +195,7 @@ pub fn verify<G: CurveGroup>(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct HPoly<F> {
     pub ui: Vec<F>,
 }
@@ -208,20 +204,69 @@ impl<F: Field> HPoly<F> {
     pub fn evaluate(&self, x: F) -> F {
         self.ui
             .iter()
+            .rev()
             .enumerate()
-            .map(|(i, &u)| u + u.inverse().unwrap() * x.pow([2_u64.pow((i as u32) - 1)]))
+            .map(|(i, &u_i)| {
+                let u_i_inv = u_i.inverse().unwrap();
+                let exp = 2_u64.pow(i as u32);
+                u_i_inv + u_i * x.pow([exp])
+            })
             .product()
+    }
+
+    pub fn coeffs(&self) -> Vec<F> {
+        let ui_inverses = {
+            let mut inverses = self.ui.clone();
+            batch_inversion(&mut inverses);
+            inverses
+        };
+
+        let k = self.ui.len();
+        let n = (2_u64).pow(k as u32);
+
+        (0..n)
+            .into_par_iter()
+            .map(|i| {
+                (0..k)
+                    .map(|j| {
+                        let idx = k - j - 1;
+                        if (i >> j) & 1 == 1 {
+                            self.ui[idx]
+                        } else {
+                            ui_inverses[idx]
+                        }
+                    })
+                    .product()
+            })
+            .collect()
     }
 }
 
-pub struct Assumption<G: CurveGroup>(PolyCommit<G>);
-
+#[derive(Debug, Clone, PartialEq)]
 pub struct Todo<G: CurveGroup> {
     pub h_poly: HPoly<G::ScalarField>,
     pub g: PolyCommit<G>,
 }
 
-pub fn fold_todos<G: CurveGroup>(
+pub fn fold_todos_witness<G: CurveGroup>(
+    todos: &[Todo<G>],
+    alpha: G::ScalarField,
+) -> Witness<G, DensePolynomial<G::ScalarField>> {
+    todos
+        .iter()
+        .map(|Todo { h_poly, .. }| Witness {
+            // It is important to put zero for the amortization, i.e. "Halo Trick"
+            r: G::ScalarField::zero(),
+            p: DensePolynomial::from_coefficients_vec(h_poly.coeffs()),
+            _group: PhantomData,
+        })
+        .zip(powers_of_x(alpha))
+        .map(|(witness, alpha_i)| witness.mul(alpha_i))
+        .reduce(|x, y| x + y)
+        .expect("Non empty statement list")
+}
+
+pub fn fold_todos_statement<G: CurveGroup>(
     todos: &[Todo<G>],
     alpha: G::ScalarField,
     x: G::ScalarField,
@@ -235,7 +280,7 @@ pub fn fold_todos<G: CurveGroup>(
         })
         .zip(powers_of_x(alpha))
         .map(|(s, alpha_i)| s.mul(alpha_i))
-        .reduce(Add::<Statement<G>>::add)
+        .reduce(|x, y| x + y)
         .expect("Non empty statement list")
 }
 
@@ -243,7 +288,7 @@ pub fn lazy_verify<G: CurveGroup>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-    assumption: Assumption<G>,
+    assumption: PolyCommit<G>,
     mut todos: Vec<Todo<G>>,
 ) -> ProofResult<Vec<Todo<G>>> {
     let n = crs.size();
@@ -276,15 +321,48 @@ pub fn lazy_verify<G: CurveGroup>(
     let b = h_poly.evaluate(statement.x);
 
     let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
-    let res = assumption.0.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
+    let res = assumption.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
 
     assert!(res.is_zero(), "Q equality");
     let todo = Todo {
-        g: assumption.0,
+        g: assumption,
         h_poly,
     };
     todos.push(todo);
     Ok(todos)
+}
+
+#[cfg(test)]
+mod test_hpoly {
+    use super::*;
+    use ark_secp256k1::Fr;
+    use ark_std::UniformRand;
+    use rand::rngs::OsRng;
+
+    #[test]
+    fn test_hpoly_evaluation_matches_expansion() {
+        let mut rng = OsRng;
+
+        // Test with a small HPoly
+        let ui: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+        let h_poly = HPoly { ui };
+        let x = Fr::rand(&mut rng);
+
+        // Compute via efficient evaluate method
+        let eval_result = h_poly.evaluate(x);
+
+        // Compute via expansion and inner product
+        let coeffs = h_poly.coeffs();
+        let n = coeffs.len();
+        let x_powers: Vec<Fr> = powers_of_x(x).take(n).collect();
+        let inner_result = inner_product(coeffs, x_powers);
+
+        assert_eq!(
+            eval_result, inner_result,
+            "HPoly evaluation mismatch: eval={:?}, inner={:?}",
+            eval_result, inner_result
+        );
+    }
 }
 
 #[cfg(test)]
@@ -297,8 +375,8 @@ mod tests_proof {
     use ark_std::UniformRand;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
-    use spongefish::DomainSeparator;
     use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
+    use spongefish::{DomainSeparator, ProofError};
     use std::ops::Add;
 
     type Fr =
@@ -309,7 +387,7 @@ mod tests_proof {
         witness: &Witness<G, DensePolynomial<G::ScalarField>>,
         statement: &Statement<G>,
         rng: &mut OsRng,
-    ) {
+    ) -> ProofResult<()> {
         let domain_separator = {
             let domain_separator = DomainSeparator::new("test-poly-comm");
             // add the IO of the bulletproof statement
@@ -351,7 +429,7 @@ mod tests_proof {
             .public_scalars(&[statement.evaluation])
             .expect("cannot add statement");
         verifier_state.ratchet().expect("failed to ratchet");
-        verify(&mut verifier_state, crs, statement).expect("proof should verify");
+        verify(&mut verifier_state, crs, statement)
     }
 
     proptest! {
@@ -371,7 +449,7 @@ mod tests_proof {
             let mut rng = OsRng;
 
             // works in normal case
-            prove_verify(&crs, &witness1, &statement1, &mut rng);
+            prove_verify(&crs, &witness1, &statement1, &mut rng).expect("normal");
 
             //can scale
             let alpha1 = Fr::rand(&mut rng);
@@ -379,9 +457,82 @@ mod tests_proof {
             let witness = witness1.mul(alpha1).add(witness2.mul(alpha2));
             let statement = statement1.mul(alpha1).add(statement2.mul(alpha2));
             assert_eq!(statement, witness.statement(&crs, statement1.x), "statements are linear");
-            prove_verify(&crs, &witness, &statement, &mut rng);
+            prove_verify(&crs, &witness, &statement, &mut rng).expect("linear");
 
 
+      }
+    }
+
+    proptest! {
+      #![proptest_config(Config::with_cases(2))]
+      #[test]
+      fn test_poly_comm_amortize((crs, witnesses, points) in any::<(CrsSize, u8)>().prop_map(|(crs_size, _)| {
+          let mut rng = OsRng;
+          let crs = <CRS<Projective>>::rand(crs_size, &mut rng);
+          let n = crs.size() as u64;
+          let m = 4;
+
+          let witnesses = {
+            let mut ws = Vec::with_capacity(m as usize);
+            for _ in 0..m {
+                ws.push(<Witness<Projective, DensePolynomial<Fr>>>::rand((n - 1) as usize, &mut rng));
+            };
+            ws
+          };
+
+          let points: Vec<Fr> = (0..witnesses.len()).map(|_|  Fr::rand(&mut rng)).collect();
+
+          (crs, witnesses, points)
+      })) {
+            let mut rng = OsRng;
+            let domain_separator = DomainSeparator::new("test-poly-comm");
+
+            let proofs = points.iter().zip(witnesses.iter()).map(|(&x, witness)| {
+                let domain_separator = OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator.clone()).ratchet();
+                let domain_separator = OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size());
+                let mut prover_state = domain_separator.to_prover_state();
+                let statement = witness.statement(&crs, x);
+                prover_state
+                    .public_points(&[statement.commitment.g])
+                    .unwrap();
+                prover_state.public_scalars(&[statement.x]).unwrap();
+                prover_state
+                    .public_scalars(&[statement.evaluation])
+                    .unwrap();
+                prover_state.ratchet().unwrap();
+                let proof = prove(&mut prover_state, &crs, &statement, witness, &mut rng)?;
+                Ok((domain_separator, prover_state.narg_string().to_vec(), statement, proof))
+            }).collect::<Result<Vec<_>, ProofError>>()?;
+
+            let verifier_todos = proofs.iter().try_fold(Vec::new(), |todos, (domain_separator, proof, statement, prover_todo)| {
+                let mut verifier_state = domain_separator.to_verifier_state(proof);
+                verifier_state
+                    .public_points(&[statement.commitment.g])
+                    .expect("cannot add statement");
+                verifier_state
+                    .public_scalars(&[statement.x])
+                    .expect("cannot add statement");
+                verifier_state
+                    .public_scalars(&[statement.evaluation])
+                    .expect("cannot add statement");
+                verifier_state.ratchet().expect("failed to ratchet");
+                lazy_verify(&mut verifier_state, &crs, statement, prover_todo.g, todos)
+            })?;
+
+            let prover_todos: Vec<Todo<Projective>> = proofs.iter().map(|(_,_,_,todo)| todo).cloned().collect();
+
+            assert_eq!(prover_todos, verifier_todos, "Prover todos don't match verifier todos");
+
+            let alpha = Fr::rand(&mut rng);
+            let x = Fr::rand(&mut rng);
+            let witness = fold_todos_witness(&prover_todos, alpha);
+            let statement = fold_todos_statement(&verifier_todos, alpha, x);
+            {
+                let prover_statement = witness.statement(&crs, x);
+                assert_eq!(prover_statement, statement, "Statements match");
+            }
+
+            prove_verify(&crs, &witness, &statement, &mut rng)?;
       }
     }
 }
