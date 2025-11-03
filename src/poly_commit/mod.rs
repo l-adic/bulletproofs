@@ -466,11 +466,10 @@ mod tests_proof {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_poly_comm_amortize((crs, witnesses, points) in any::<(CrsSize, u8)>().prop_map(|(crs_size, _)| {
+      fn test_poly_comm_amortize((crs, witnesses, points) in (any::<CrsSize>(), (2_u8..20_u8)).prop_map(|(crs_size, m)| {
           let mut rng = OsRng;
           let crs = <CRS<Projective>>::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
-          let m = 4;
 
           let witnesses = {
             let mut ws = Vec::with_capacity(m as usize);
@@ -484,12 +483,11 @@ mod tests_proof {
 
           (crs, witnesses, points)
       })) {
-            let mut rng = OsRng;
             let domain_separator = DomainSeparator::new("test-poly-comm");
             let domain_separator = OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator.clone()).ratchet();
             let domain_separator = OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size());
 
-            let proofs = points.iter().zip(witnesses.iter()).map(|(&x, witness)| {
+            let proofs = points.par_iter().zip(witnesses.par_iter()).map(|(&x, witness)| {
                 let mut prover_state = domain_separator.to_prover_state();
                 let statement = witness.statement(&crs, x);
                 prover_state
@@ -500,7 +498,7 @@ mod tests_proof {
                     .public_scalars(&[statement.evaluation])
                     .unwrap();
                 prover_state.ratchet().unwrap();
-                let proof = prove(&mut prover_state, &crs, &statement, witness, &mut rng)?;
+                let proof = prove(&mut prover_state, &crs, &statement, witness, &mut OsRng)?;
                 Ok((prover_state.narg_string().to_vec(), statement, proof))
             }).collect::<Result<Vec<_>, ProofError>>()?;
 
@@ -523,8 +521,8 @@ mod tests_proof {
 
             assert_eq!(prover_todos, verifier_todos, "Prover todos don't match verifier todos");
 
-            let alpha = Fr::rand(&mut rng);
-            let x = Fr::rand(&mut rng);
+            let alpha = Fr::rand(&mut OsRng);
+            let x = Fr::rand(&mut OsRng);
             let witness = fold_todos_witness(&prover_todos, alpha);
             let statement = fold_todos_statement(&verifier_todos, alpha, x);
             {
@@ -532,7 +530,7 @@ mod tests_proof {
                 assert_eq!(prover_statement, statement, "Statements match");
             }
 
-            prove_verify(&crs, &witness, &statement, &mut rng)?;
+            prove_verify(&crs, &witness, &statement, &mut OsRng)?;
       }
     }
 }
