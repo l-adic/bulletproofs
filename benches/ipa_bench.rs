@@ -45,9 +45,9 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
             b.iter(|| {
                 let witness = IpaWitness::rand(witness_size as u64, rng);
                 let stmt = witness.statement(crs);
-                
-                let domain_separator = spongefish::domain_separator!("ipa-benchmark")
-                    .instance(&0u8);
+
+                let domain_separator =
+                    spongefish::domain_separator!("ipa-benchmark").instance(&stmt);
                 let mut prover_state = domain_separator.std_prover();
 
                 let proof = ipa_prove(&mut prover_state, crs, stmt, &witness);
@@ -63,8 +63,8 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
         |b, _| {
             b.iter(|| {
                 let (stmt, proof) = proofs.choose(rng).unwrap();
-                let domain_separator = spongefish::domain_separator!("ipa-benchmark")
-                    .instance(&0u8);
+                let domain_separator =
+                    spongefish::domain_separator!("ipa-benchmark").instance(&stmt);
                 let mut verifier_state = domain_separator.std_verifier(&proof.proof);
                 ipa_verify(&mut verifier_state, crs, stmt).unwrap();
             })
@@ -80,17 +80,12 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
 
                 let verifications = selected_proofs
                     .into_par_iter()
-                    .map(
-                        |(
-                            statement,
-                            ProofData { proof },
-                        )| {
-                            let domain_separator = spongefish::domain_separator!("ipa-benchmark")
-                                .instance(&0u8);
-                            let mut verifier_state = domain_separator.std_verifier(proof);
-                            verify_aux(&mut verifier_state, crs, statement)
-                        },
-                    )
+                    .map(|(statement, ProofData { proof })| {
+                        let domain_separator =
+                            spongefish::domain_separator!("ipa-benchmark").instance(statement);
+                        let mut verifier_state = domain_separator.std_verifier(proof);
+                        verify_aux(&mut verifier_state, crs, statement)
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
 

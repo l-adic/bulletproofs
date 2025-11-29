@@ -5,6 +5,10 @@ pub mod poly_commit;
 pub mod range;
 mod vector_ops;
 
+// Unified error handling for all bulletproof operations
+pub use spongefish::VerificationError;
+pub type BulletproofResult<T> = Result<T, VerificationError>;
+
 #[cfg(test)]
 mod test {
     use std::sync::Once;

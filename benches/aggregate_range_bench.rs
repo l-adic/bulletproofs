@@ -5,10 +5,7 @@ use ark_secp256k1::{Fr, Projective};
 use bulletproofs::{
     msm::verify_batch_aux,
     range::{
-        aggregate::{
-            prove as aggregate_prove,
-            verify as aggregate_verify, verify_aux,
-        },
+        aggregate::{prove as aggregate_prove, verify as aggregate_verify, verify_aux},
         types::{self as range_types, CRS as RangeCRS, aggregate::Statement},
     },
 };
@@ -30,7 +27,7 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
     m: usize,
     rng: &mut Rng,
 ) {
-    let mut group = c.benchmark_group(format!("aggregate_range_{}_{}", n_bits, m));
+    let mut group = c.benchmark_group(format!("aggregate_range_{n_bits}_{m}"));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(60));
 
@@ -47,10 +44,10 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
             let witness = range_types::aggregate::Witness::<Fr>::new(v, n_bits, rng);
             let statement = range_types::aggregate::Statement::<Projective>::new(crs, &witness);
 
-            let domain_separator = spongefish::domain_separator!("aggregate-range-benchmark")
-                .instance(&0u8);
+            let domain_separator =
+                spongefish::domain_separator!("aggregate-range-benchmark").instance(&statement.v);
             let prover_state = domain_separator.std_prover();
-            
+
             let proof = aggregate_prove::<Projective, _>(prover_state, crs, &witness, rng);
             let proof_data = ProofData { proof };
             proofs.push((statement, proof_data));
@@ -60,8 +57,8 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
     group.bench_with_input(BenchmarkId::new("verify", m), &m, |b, _| {
         b.iter(|| {
             let (statement, proof_data) = proofs.choose(rng).unwrap();
-            let domain_separator = spongefish::domain_separator!("aggregate-range-benchmark")
-                .instance(&0u8);
+            let domain_separator =
+                spongefish::domain_separator!("aggregate-range-benchmark").instance(&statement.v);
             let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
             aggregate_verify::<Projective, _>(&mut verifier_state, crs, statement, rng).unwrap();
         })
@@ -73,17 +70,13 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
 
             let verifications = selected_proofs
                 .into_par_iter()
-                .map(
-                    |(
-                        statement,
-                        ProofData { proof },
-                    )| {
-                        let domain_separator = spongefish::domain_separator!("aggregate-range-benchmark")
-                            .instance(&0u8);
-                        let mut verifier_state = domain_separator.std_verifier(proof);
-                        verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
-                    },
-                )
+                .map(|(statement, ProofData { proof })| {
+                    let domain_separator =
+                        spongefish::domain_separator!("aggregate-range-benchmark")
+                            .instance(&statement.v);
+                    let mut verifier_state = domain_separator.std_verifier(proof);
+                    verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 

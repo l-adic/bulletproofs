@@ -1,9 +1,7 @@
 use ark_ec::{CurveGroup, PrimeGroup};
 // use ark_ff::Field;
-use spongefish::{
-    Codec, Encoding, NargDeserialize, ProverState, VerificationError, VerificationResult,
-    VerifierState,
-};
+use crate::BulletproofResult;
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::ops::Mul;
 
 use crate::{
@@ -14,24 +12,8 @@ use crate::{
     msm::Msm,
 };
 
-pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
-    fn extended_bulletproof_statement(self) -> Self;
-    fn add_extended_bulletproof(self, len: usize) -> Self;
-}
-
-//impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
-//where
-//    G: CurveGroup,
-//    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-//{
-//    fn extended_bulletproof_statement(self) -> Self {
-//        self.bulletproof_statement().add_scalars(1, "dot-product")
-//    }
-//
-//    fn add_extended_bulletproof(self, len: usize) -> Self {
-//        self.challenge_scalars(1, "x").add_bulletproof(len)
-//    }
-//}
+// Extended domain separator traits are no longer needed with the new spongefish API.
+// The domain_separator! macro handles all transcript management automatically.
 
 pub fn prove<G: CurveGroup + Encoding>(
     prover_state: &mut ProverState,
@@ -59,7 +41,7 @@ pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
-) -> VerificationResult<()>
+) -> BulletproofResult<()>
 where
     G::ScalarField: Codec,
 {
@@ -68,7 +50,7 @@ where
     if g.is_zero() {
         Ok(())
     } else {
-        Err(VerificationError)
+        Err(crate::VerificationError)
     }
 }
 
@@ -76,7 +58,7 @@ pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
-) -> VerificationResult<Msm<G>>
+) -> BulletproofResult<Msm<G>>
 where
     G::ScalarField: Codec,
 {

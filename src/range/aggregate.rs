@@ -1,8 +1,7 @@
+use crate::BulletproofResult;
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, UniformRand, Zero};
-use spongefish::{
-    Codec, Encoding, NargDeserialize, ProverState, VerificationError, VerificationResult,
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState};
 use std::{iter::successors, ops::Mul};
 use tracing::instrument;
 
@@ -20,32 +19,8 @@ use crate::{
     vector_ops::inner_product,
 };
 
-// #[allow(dead_code)]
-// pub trait AggregatedRangeProofDomainSeparator<G: CurveGroup> {
-//     fn aggregated_range_proof_statement(self, m: usize) -> Self;
-//     fn add_aggregated_range_proof(self, n_bits: usize, m: usize) -> Self;
-// }
-
-// impl<G> AggregatedRangeProofDomainSeparator<G> for DomainSeparator
-// where
-//     G: CurveGroup,
-//     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-// {
-//     fn aggregated_range_proof_statement(self, m: usize) -> Self {
-//         self.add_points(m, "Range proof statement")
-//     }
-
-//     fn add_aggregated_range_proof(mut self, n_bits: usize, m: usize) -> Self {
-//         self = self
-//             .add_points(2, "round-message: A, S")
-//             .challenge_scalars(2, "challenge [y,z]")
-//             .add_points(2, "round-message: T1, T2")
-//             .challenge_scalars(1, "challenge x")
-//             .add_scalars(3, "round-message: t_x, mu, t_hat")
-//             .add_extended_bulletproof(n_bits * m);
-//         self
-//     }
-// }
+// Domain separator traits are no longer needed with the new spongefish API.
+// Spongefish handles transcript management internally.
 
 #[instrument(skip_all, fields(n_bits = witness.n_bits, m = witness.len()), level = "debug")]
 pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
@@ -202,7 +177,7 @@ pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     crs: &CRS<G>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> VerificationResult<Msm<G>>
+) -> BulletproofResult<Msm<G>>
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
@@ -297,7 +272,7 @@ where
                 ipa::extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
 
             msm.scale_elems(scaled_hs.into_iter());
-            Ok::<_, VerificationError>(msm)
+            Ok::<_, crate::VerificationError>(msm)
         },
     );
     let mut msm = msm?;
@@ -314,7 +289,7 @@ pub fn verify<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     crs: &CRS<G>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> VerificationResult<()>
+) -> BulletproofResult<()>
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
@@ -323,9 +298,92 @@ where
     if g.is_zero() {
         Ok(())
     } else {
-        Err(VerificationError)
+        Err(crate::VerificationError)
     }
 }
-// #[cfg(test)]
-// mod tests_range {
-// Tests commented out - need to be updated for new spongefish API
+#[cfg(test)]
+mod tests_range {
+    use crate::msm::verify_batch_aux;
+
+    use super::*;
+    use ark_secp256k1::{Fr, Projective};
+    use nonempty::NonEmpty;
+    use proptest::{prelude::*, test_runner::Config};
+    use rand::rngs::OsRng;
+    use rayon::prelude::*;
+
+    proptest! {
+          #![proptest_config(Config::with_cases(2))]
+          #[test]
+        fn test_aggregated_range_proof(
+            n_bits in prop_oneof![Just(16), Just(32), Just(64)],
+            m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64), Just(128), Just(256), Just(512)]
+        ) {
+
+            let mut rng = OsRng;
+            let crs: CRS<Projective> = CRS::rand(n_bits * m, &mut rng);
+
+            // Generate m random values in range [0, 2^n_bits)
+            let max_value = (1u128 << n_bits.min(127)) - 1;
+            let v: Vec<Fr> = (0..m)
+                .map(|_| Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value)))
+                .collect();
+
+            let witness = Witness::<Fr>::new(v, n_bits, &mut rng);
+            let statement = Statement::new(&crs, &witness);
+
+            let domain_separator = spongefish::domain_separator!("test-aggregated-range-proof")
+                .instance(&statement.v);
+
+            let prover_state = domain_separator.std_prover();
+            let proof = prove(prover_state, &crs, &witness, &mut rng);
+
+            tracing::info!("proof size: {} bytes", proof.len());
+
+            let mut verifier_state = domain_separator.std_verifier(&proof);
+            verify(&mut verifier_state, &crs, &statement, &mut rng).expect("proof should verify")
+        }
+    }
+
+    proptest! {
+      #![proptest_config(Config::with_cases(2))]
+      #[test]
+      fn test_batch_aggregated_range_proof_verify_works(
+          n_bits in prop_oneof![Just(8usize), Just(16), Just(32)],
+          m in prop_oneof![Just(2usize), Just(4), Just(8), Just(16)]
+      ) {
+
+        let mut rng = OsRng;
+        let crs: CRS<Projective> = CRS::rand(n_bits * m, &mut rng);
+
+        let witnesses = (0..4).map(|_| {
+            let max_value = (1u128 << n_bits.min(127)) - 1;
+            let v: Vec<Fr> = (0..m)
+                .map(|_| Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value)))
+                .collect();
+            Witness::<Fr>::new(v, n_bits, &mut rng)
+        }).collect::<Vec<_>>();
+
+        let statements = witnesses.iter().map(|w| (w, Statement::new(&crs, w))).collect::<Vec<_>>();
+
+        let proofs = statements.par_iter().map(|(witness, statement)| {
+            let domain_separator = spongefish::domain_separator!("test-aggregated-range-proof-batch")
+                .instance(&statement.v);
+            let prover_state = domain_separator.std_prover();
+            let proof = prove(prover_state, &crs, witness, &mut OsRng);
+            Ok((statement, proof))
+        }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
+
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof)| {
+            let domain_separator = spongefish::domain_separator!("test-aggregated-range-proof-batch")
+                .instance(&statement.v);
+            let mut verifier_state = domain_separator.std_verifier(proof);
+            verify_aux(&mut verifier_state, &crs, statement, &mut OsRng)
+        }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
+
+        let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
+
+        verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
+      }
+    }
+}

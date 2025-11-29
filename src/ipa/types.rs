@@ -155,6 +155,12 @@ impl<G: CurveGroup> Add for Statement<G> {
     }
 }
 
+impl<G: CurveGroup + Encoding> Encoding for &Statement<G> {
+    fn encode(&self) -> impl AsRef<[u8]> {
+        (*self).encode()
+    }
+}
+
 pub mod extended {
     use ark_ec::CurveGroup;
     use spongefish::Encoding;

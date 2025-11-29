@@ -1,45 +1,24 @@
 pub mod extended;
 pub mod types;
 
+use crate::BulletproofResult;
 use crate::{
     ipa::types::{CRS, Statement, Witness},
     msm::Msm,
     vector_ops::{VectorOps, inner_product},
 };
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_ff::{Field, One, Zero, batch_inversion};
+#[cfg(test)]
+use ark_ff::Zero;
+use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
 use rayon::prelude::*;
-use spongefish::{
-    Codec, Encoding, NargDeserialize, ProverState, VerificationError, VerificationResult,
-    VerifierState,
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::ops::Mul;
 use tracing::instrument;
 
-pub trait BulletproofDomainSeparator<G: CurveGroup> {
-    fn bulletproof_statement(self) -> Self;
-    fn add_bulletproof(self, len: usize) -> Self;
-}
-
-//impl<G> BulletproofDomainSeparator<G> for DomainSeparator
-//where
-//    G: CurveGroup,
-//    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-//{
-//    fn bulletproof_statement(self) -> Self {
-//        self.add_points(1, "Pedersen commitment")
-//    }
-//
-//    fn add_bulletproof(mut self, len: usize) -> Self {
-//        for _ in 0..log2(len) {
-//            self = self
-//                .add_points(2, "round-message")
-//                .challenge_scalars(1, "challenge");
-//        }
-//        self.add_scalars(2, "final-message")
-//    }
-//}
+// Domain separator traits are no longer needed with the new spongefish API.
+// The domain_separator! macro and instance() method handle all transcript management automatically.
 
 #[instrument(skip_all, fields(witness_size = witness.a.len()), level = "debug")]
 pub fn prove<G: CurveGroup + Encoding>(
@@ -129,7 +108,7 @@ pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> VerificationResult<Msm<G>>
+) -> BulletproofResult<Msm<G>>
 where
     G::ScalarField: Codec,
 {
@@ -142,7 +121,7 @@ where
             let x: G::ScalarField = verifier_state.verifier_message();
             Ok(((left, right), x))
         })
-        .collect::<VerificationResult<Vec<_>>>()?;
+        .collect::<BulletproofResult<Vec<_>>>()?;
 
     let mut msm = Msm::new();
 
@@ -223,7 +202,7 @@ pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> VerificationResult<()>
+) -> BulletproofResult<()>
 where
     G::ScalarField: Codec,
 {
@@ -233,7 +212,7 @@ where
     if g.is_zero() {
         Ok(())
     } else {
-        Err(VerificationError)
+        Err(crate::VerificationError)
     }
 }
 
@@ -262,15 +241,13 @@ fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
 #[cfg(test)]
 mod tests_proof {
     use super::*;
-    use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
+    // ExtendedBulletproofDomainSeparator trait removed - no longer needed with spongefish API
     use crate::ipa::types::{self as ipa_types, CrsSize};
     use crate::msm::verify_batch_aux;
     use ark_vesta::{self, Projective};
     use nonempty::NonEmpty;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
-    use spongefish::DomainSeparator;
-    use spongefish::domain_separator;
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]

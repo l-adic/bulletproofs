@@ -1,11 +1,9 @@
 use std::{iter::successors, ops::Mul};
 
+use crate::BulletproofResult;
 use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, UniformRand, Zero};
-use spongefish::{
-    Codec, Encoding, NargDeserialize, ProverState, VerificationError, VerificationResult,
-    VerifierState,
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use tracing::instrument;
 
 use crate::{
@@ -18,31 +16,8 @@ use crate::{
 
 pub mod types;
 
-// pub trait CircuitProofDomainSeparator<G: CurveGroup> {
-//     fn circuit_proof_statement(self, n: usize) -> Self;
-//     fn add_circuit_proof(self, n: usize) -> Self;
-// }
-
-// impl<G> CircuitProofDomainSeparator<G> for DomainSeparator
-// where
-//     G: CurveGroup,
-//     Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-// {
-//     fn circuit_proof_statement(self, n: usize) -> Self {
-//         self.add_points(n, "circuit proof statement")
-//     }
-
-//     fn add_circuit_proof(mut self, n: usize) -> Self {
-//         self = self
-//             .add_points(3, "round-message: A_i, A_o, S")
-//             .challenge_scalars(2, "challenge [y,z]")
-//             .add_points(5, "round-message: T1, T3, T4, T5, T6")
-//             .challenge_scalars(1, "challenge x")
-//             .add_scalars(3, "round-message: tau_x, mu, t_hat")
-//             .add_extended_bulletproof(n);
-//         self
-//     }
-// }
+// Domain separator traits are no longer needed with the new spongefish API.
+// Spongefish handles transcript management internally.
 
 pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
     prover_state: &mut ProverState,
@@ -248,7 +223,7 @@ pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     circuit: &types::Circuit<G::ScalarField>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> VerificationResult<Msm<G>>
+) -> BulletproofResult<Msm<G>>
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
@@ -379,7 +354,7 @@ where
         let mut msm =
             crate::ipa::extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
         msm.scale_elems(scaled_hs.into_iter());
-        Ok::<_, VerificationError>(msm)
+        Ok::<_, crate::VerificationError>(msm)
     }?;
 
     let alpha = G::ScalarField::rand(rng);
@@ -396,7 +371,7 @@ pub fn verify<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     circuit: &types::Circuit<G::ScalarField>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> VerificationResult<()>
+) -> BulletproofResult<()>
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
@@ -405,10 +380,85 @@ where
     if g.is_zero() {
         Ok(())
     } else {
-        Err(VerificationError)
+        Err(crate::VerificationError)
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-// Tests commented out - need to be updated for new spongefish API
+#[cfg(test)]
+mod tests {
+    use crate::circuit::types::Statement;
+
+    use super::*;
+    use ark_secp256k1::{Fr, Projective};
+    use nonempty::NonEmpty;
+    use proptest::{prelude::*, test_runner::Config};
+    use rand::rngs::OsRng;
+    use rayon::prelude::*;
+
+    proptest! {
+        #![proptest_config(Config::with_cases(2))]
+        #[test]
+        fn test_circuit_proof(
+           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)], 4usize..100)
+        ) {
+            let mut rng = OsRng;
+
+            let (circuit, witness) = types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
+
+            assert!(circuit.is_satisfied_by(&witness), "Circuit not satisfied by witness");
+
+            let crs: types::CRS<Projective> = types::CRS::rand(circuit.dim(), &mut rng);
+
+            let statement: Statement<Projective> = Statement::new(&crs, &witness);
+
+            let domain_separator = spongefish::domain_separator!("test-circuit-proof")
+                .instance(&statement.v);
+
+            let mut prover_state = domain_separator.std_prover();
+            let proof = prove(&mut prover_state, &crs, &circuit, &witness, &mut rng);
+
+            let mut verifier_state = domain_separator.std_verifier(&proof);
+            verify(&mut verifier_state, &crs, &circuit, &statement, &mut OsRng).expect("proof should verify");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(Config::with_cases(2))]
+        #[test]
+        fn test_batch_circuit_proof_verify_works(
+           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16)], 4usize..50)
+        ) {
+            let mut rng = OsRng;
+
+            let circuits_and_witnesses = (0..4).map(|_| {
+                types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng)
+            }).collect::<Vec<_>>();
+
+            let crs: types::CRS<Projective> = types::CRS::rand(n, &mut rng);
+
+            let statements = circuits_and_witnesses.iter().map(|(circuit, witness)| {
+                assert!(circuit.is_satisfied_by(witness), "Circuit not satisfied by witness");
+                (circuit, witness, Statement::new(&crs, witness))
+            }).collect::<Vec<_>>();
+
+            let proofs = statements.par_iter().map(|(circuit, witness, statement)| {
+                let domain_separator = spongefish::domain_separator!("test-circuit-proof-batch")
+                    .instance(&statement.v);
+                let mut prover_state = domain_separator.std_prover();
+                let proof = prove(&mut prover_state, &crs, circuit, witness, &mut OsRng);
+                Ok((circuit, statement, proof))
+            }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
+
+            let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(circuit, statement, proof)| {
+                let domain_separator = spongefish::domain_separator!("test-circuit-proof-batch")
+                    .instance(&statement.v);
+                let mut verifier_state = domain_separator.std_verifier(proof);
+                verify_aux(&mut verifier_state, &crs, circuit, statement, &mut OsRng)
+            }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
+
+            let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
+
+            crate::msm::verify_batch_aux(verifications, &mut OsRng).expect("should verify batch");
+        }
+    }
+}

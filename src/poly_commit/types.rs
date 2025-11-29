@@ -1,6 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::Zero;
 use ark_poly::{DenseUVPolynomial, polynomial};
+use spongefish::Encoding;
 use std::marker::PhantomData;
 use std::ops::{Add, Mul};
 
@@ -27,7 +28,7 @@ impl<G: CurveGroup> CRS<G> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Encoding)]
 pub struct PolyCommit<G: CurveGroup> {
     pub g: G,
 }
@@ -99,7 +100,7 @@ impl<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>> Witness<G, P> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Encoding)]
 pub struct Statement<G: CurveGroup> {
     pub commitment: PolyCommit<G>,
     pub x: G::ScalarField,

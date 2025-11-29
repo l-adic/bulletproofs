@@ -261,7 +261,7 @@ mod tests {
                 + inner_product(circuit.w_o[i].iter().copied(), witness.a_o.iter().copied());
             let rhs = inner_product(circuit.w_v[i].iter().copied(), witness.v.iter().copied())
                 + circuit.c[i];
-            assert_eq!(lhs, rhs, "Circuit constraint {} not satisfied", i);
+            assert_eq!(lhs, rhs, "Circuit constraint {i} not satisfied");
         }
     }
 }

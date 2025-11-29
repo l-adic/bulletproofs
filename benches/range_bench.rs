@@ -27,7 +27,7 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
     n_bits: usize,
     rng: &mut Rng,
 ) {
-    let mut group = c.benchmark_group(format!("range_{}", n_bits));
+    let mut group = c.benchmark_group(format!("range_{n_bits}"));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
@@ -42,11 +42,11 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
             let v = Fr::from(rand::Rng::gen_range(rng, 0u128..=max_value));
             let witness = RangeWitness::<Fr>::new(v, n_bits, rng);
             let statement = RangeStatement::<Projective>::new(crs, &witness);
-            
-            let domain_separator = spongefish::domain_separator!("range-benchmark")
-                .instance(&0u8);
+
+            let domain_separator =
+                spongefish::domain_separator!("range-benchmark").instance(&statement.v);
             let prover_state = domain_separator.std_prover();
-            
+
             let proof = range_prove::<Projective, _>(prover_state, crs, &witness, rng);
             let proof_data = ProofData { proof };
             proofs.push((statement, proof_data));
@@ -56,8 +56,8 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
     group.bench_with_input(BenchmarkId::new("verify", n_bits), &n_bits, |b, _| {
         b.iter(|| {
             let (statement, proof_data) = proofs.choose(rng).unwrap();
-            let domain_separator = spongefish::domain_separator!("range-benchmark")
-                .instance(&0u8);
+            let domain_separator =
+                spongefish::domain_separator!("range-benchmark").instance(&statement.v);
             let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
             range_verify::<Projective, _>(&mut verifier_state, crs, statement, rng).unwrap();
         })
@@ -69,17 +69,12 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
 
             let verifications = selected_proofs
                 .into_par_iter()
-                .map(
-                    |(
-                        statement,
-                        ProofData { proof },
-                    )| {
-                        let domain_separator = spongefish::domain_separator!("range-benchmark")
-                            .instance(&0u8);
-                        let mut verifier_state = domain_separator.std_verifier(proof);
-                        verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
-                    },
-                )
+                .map(|(statement, ProofData { proof })| {
+                    let domain_separator =
+                        spongefish::domain_separator!("range-benchmark").instance(&statement.v);
+                    let mut verifier_state = domain_separator.std_verifier(proof);
+                    verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 

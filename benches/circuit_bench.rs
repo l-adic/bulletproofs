@@ -28,7 +28,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
     q: usize, // number of constraints
     rng: &mut Rng,
 ) {
-    let mut group = c.benchmark_group(format!("circuit_{}_{}", n, q));
+    let mut group = c.benchmark_group(format!("circuit_{n}_{q}"));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
@@ -39,15 +39,15 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark prove
     group.bench_with_input(
-        BenchmarkId::new("prove", format!("{}_{}", n, q)),
+        BenchmarkId::new("prove", format!("{n}_{q}")),
         &(n, q),
         |b, _| {
             b.iter(|| {
                 let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, rng);
                 let statement: CircuitStatement<Projective> = CircuitStatement::new(crs, &witness);
-                
-                let domain_separator = spongefish::domain_separator!("circuit-benchmark")
-                    .instance(&0u8);
+
+                let domain_separator =
+                    spongefish::domain_separator!("circuit-benchmark").instance(&statement.v);
                 let mut prover_state = domain_separator.std_prover();
 
                 let proof = circuit_prove(&mut prover_state, crs, &circuit, &witness, rng);
@@ -59,13 +59,13 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark verify using the same domain separator and pre-generated proof
     group.bench_with_input(
-        BenchmarkId::new("verify", format!("{}_{}", n, q)),
+        BenchmarkId::new("verify", format!("{n}_{q}")),
         &(n, q),
         |b, _| {
             b.iter(|| {
                 let (circuit, statement, proof_data) = proofs.choose(rng).unwrap();
-                let domain_separator = spongefish::domain_separator!("circuit-benchmark")
-                    .instance(&0u8);
+                let domain_separator =
+                    spongefish::domain_separator!("circuit-benchmark").instance(&statement.v);
                 let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
 
                 circuit_verify(&mut verifier_state, crs, circuit, statement, rng).unwrap();
@@ -75,7 +75,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark batch verify
     group.bench_with_input(
-        BenchmarkId::new("verify_batch", format!("{}_{}", n, q)),
+        BenchmarkId::new("verify_batch", format!("{n}_{q}")),
         &(n, q),
         |b, _| {
             b.iter(|| {
@@ -85,7 +85,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
                     .into_par_iter()
                     .map(|(circuit, statement, proof_data)| {
                         let domain_separator = spongefish::domain_separator!("circuit-benchmark")
-                            .instance(&0u8);
+                            .instance(&statement.v);
                         let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
                         verify_aux(&mut verifier_state, crs, circuit, statement, &mut OsRng)
                     })
