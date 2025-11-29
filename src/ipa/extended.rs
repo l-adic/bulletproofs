@@ -1,14 +1,14 @@
-use ark_ec::CurveGroup;
-use ark_ff::Field;
+use ark_ec::{CurveGroup, PrimeGroup};
+// use ark_ff::Field;
 use spongefish::{
-    DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
-    codecs::arkworks_algebra::{FieldDomainSeparator, GroupDomainSeparator, UnitToField},
+    Codec, Encoding, NargDeserialize, ProverState, VerificationError, VerificationResult,
+    VerifierState,
 };
 use std::ops::Mul;
 
 use crate::{
     ipa::{
-        self as ipa, BulletproofDomainSeparator,
+        self as ipa,
         types::{self as ipa_types, CRS, Statement, Witness},
     },
     msm::Msm,
@@ -19,30 +19,33 @@ pub trait ExtendedBulletproofDomainSeparator<G: CurveGroup> {
     fn add_extended_bulletproof(self, len: usize) -> Self;
 }
 
-impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
-where
-    G: CurveGroup,
-    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-{
-    fn extended_bulletproof_statement(self) -> Self {
-        self.bulletproof_statement().add_scalars(1, "dot-product")
-    }
+//impl<G> ExtendedBulletproofDomainSeparator<G> for DomainSeparator
+//where
+//    G: CurveGroup,
+//    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
+//{
+//    fn extended_bulletproof_statement(self) -> Self {
+//        self.bulletproof_statement().add_scalars(1, "dot-product")
+//    }
+//
+//    fn add_extended_bulletproof(self, len: usize) -> Self {
+//        self.challenge_scalars(1, "x").add_bulletproof(len)
+//    }
+//}
 
-    fn add_extended_bulletproof(self, len: usize) -> Self {
-        self.challenge_scalars(1, "x").add_bulletproof(len)
-    }
-}
-
-pub fn prove<G: CurveGroup>(
+pub fn prove<G: CurveGroup + Encoding>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
     witness: &Witness<G>,
-) -> ProofResult<Vec<u8>> {
-    let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+) -> Vec<u8>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
+    let x: G::ScalarField = prover_state.verifier_message();
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
-        witness_size: witness.size(),
+        witness_size: witness.size() as u64,
     };
     let crs_mod = CRS {
         gs: crs.gs.clone(),
@@ -52,29 +55,32 @@ pub fn prove<G: CurveGroup>(
     ipa::prove(prover_state, &crs_mod, statement, witness)
 }
 
-pub fn verify<G: CurveGroup>(
+pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
-) -> ProofResult<()>
+) -> VerificationResult<()>
 where
-    G::ScalarField: Field,
+    G::ScalarField: Codec,
 {
     let msm = verify_aux(verifier_state, crs, ext_statement)?;
     let g = msm.execute();
     if g.is_zero() {
         Ok(())
     } else {
-        Err(ProofError::InvalidProof)
+        Err(VerificationError)
     }
 }
 
-pub fn verify_aux<G: CurveGroup>(
+pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     ext_statement: &ipa_types::extended::Statement<G>,
-) -> ProofResult<Msm<G>> {
-    let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+) -> VerificationResult<Msm<G>>
+where
+    G::ScalarField: Codec,
+{
+    let x: G::ScalarField = verifier_state.verifier_message();
     let statement = Statement {
         p: ext_statement.p + crs.u.mul(x * ext_statement.c),
         witness_size: ext_statement.witness_size,

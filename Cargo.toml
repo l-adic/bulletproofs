@@ -8,10 +8,11 @@ ark-ec = {version = "0.5.0", features = ["parallel"]}
 ark-ff = {version = "0.5.0", features = ["parallel"]}
 ark-poly = {version = "0.5.0", features = ["parallel"]}
 ark-secp256k1 = "0.5.0"
+ark-vesta = "0.5.0"
 ark-std = {version = "0.5.0", features = ["parallel"]}
 nonempty = "0.12"
 proptest = "1.7.0"
-spongefish = {git = "https://github.com/arkworks-rs/spongefish" , ref = "cda8c90", features = ["arkworks-algebra"]}
+spongefish = {git = "https://github.com/arkworks-rs/spongefish" , ref = "cda8c90", features = ["derive", "ark-ff", "ark-ec"] }
 rand = "0.8"
 rayon = "1.11"
 tracing = "0.1"
