@@ -1,6 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::{Field, UniformRand};
 use ark_std::log2;
+use spongefish::Encoding;
 
 use crate::ipa::types::CrsSize;
 use crate::vector_ops::{hadamard, inner_product};
@@ -75,6 +76,7 @@ impl<Fr: Field> Witness<Fr> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encoding)]
 pub struct Statement<G: CurveGroup> {
     pub v: Vec<G>,
 }

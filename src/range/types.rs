@@ -1,6 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::{BigInteger, Field, PrimeField};
 use ark_std::log2;
+use spongefish::Encoding;
 use std::ops::Mul;
 
 use crate::ipa::types::CrsSize;
@@ -35,13 +36,13 @@ where {
 pub struct Witness<Fr> {
     pub v: Fr,
     pub gamma: Fr,
-    pub n_bits: usize,
+    pub n_bits: u64,
 }
 
 impl<Fr: PrimeField> Witness<Fr> {
-    pub fn new<Rng: rand::Rng>(v: Fr, n_bits: usize, rng: &mut Rng) -> Self {
+    pub fn new<Rng: rand::Rng>(v: Fr, n_bits: u64, rng: &mut Rng) -> Self {
         assert!(
-            v.into_bigint().num_bits() as usize <= n_bits,
+            v.into_bigint().num_bits() as usize <= n_bits as usize,
             "Value exceeds n_bits limit"
         );
         Witness {
@@ -52,10 +53,10 @@ impl<Fr: PrimeField> Witness<Fr> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encoding)]
 pub struct Statement<G> {
     pub v: G,
-    pub n_bits: usize,
+    pub n_bits: u64,
 }
 
 impl<G: CurveGroup> Statement<G> {
@@ -132,18 +133,19 @@ pub mod aggregate {
     use crate::range::types::CRS;
     use ark_ec::CurveGroup;
     use ark_ff::{BigInteger, PrimeField};
+    use spongefish::Encoding;
     use std::ops::Mul;
 
     pub struct Witness<Fr> {
         pub v: Vec<Fr>,
         pub gamma: Vec<Fr>,
-        pub n_bits: usize,
+        pub n_bits: u64,
     }
 
     impl<Fr: PrimeField> Witness<Fr> {
-        pub fn new<Rng: rand::Rng>(v: Vec<Fr>, n_bits: usize, rang: &mut Rng) -> Self {
+        pub fn new<Rng: rand::Rng>(v: Vec<Fr>, n_bits: u64, rang: &mut Rng) -> Self {
             for val in &v {
-                assert!(val.into_bigint().num_bits() as usize <= n_bits);
+                assert!(val.into_bigint().num_bits() as usize <= n_bits as usize);
             }
 
             let gamma = (0..v.len()).map(|_| Fr::rand(rang)).collect();
@@ -156,10 +158,10 @@ pub mod aggregate {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, Encoding)]
     pub struct Statement<G> {
         pub v: Vec<G>,
-        pub n_bits: usize,
+        pub n_bits: u64,
     }
 
     impl<G: CurveGroup> Statement<G> {

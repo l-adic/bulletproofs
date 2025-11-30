@@ -37,24 +37,24 @@ where
 {
     let n_bits = witness.n_bits;
     assert!(
-        crs.size() >= n_bits,
+        crs.size() >= n_bits as usize,
         "CRS size is smaller than witness nbits"
     );
 
-    let gs = &crs.ipa_crs.gs[0..n_bits];
-    let hs = &crs.ipa_crs.hs[0..n_bits];
+    let gs = &crs.ipa_crs.gs[0..n_bits as usize];
+    let hs = &crs.ipa_crs.hs[0..n_bits as usize];
 
-    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
+    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits as usize];
     // powers of 2
     let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
         Some(*succ * G::ScalarField::from(2u64))
     })
-    .take(n_bits)
+    .take(n_bits as usize)
     .collect();
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
-        bits.resize(n_bits, G::ScalarField::zero());
+        bits.resize(n_bits as usize, G::ScalarField::zero());
         bits
     };
 
@@ -62,10 +62,10 @@ where
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let rho: G::ScalarField = UniformRand::rand(rng);
-    let s_l = (0..n_bits)
+    let s_l = (0..n_bits as usize)
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
-    let s_r = (0..n_bits)
+    let s_r = (0..n_bits as usize)
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
 
@@ -88,7 +88,7 @@ where
     ];
     let y_vec: Vec<G::ScalarField> =
         successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n_bits)
+            .take(n_bits as usize)
             .collect();
 
     let l_poly = {
@@ -98,7 +98,7 @@ where
                 .collect(),
             s_l,
         ];
-        VectorPolynomial::new(coeffs, n_bits)
+        VectorPolynomial::new(coeffs, n_bits as usize)
     };
 
     let r_poly = {
@@ -115,7 +115,7 @@ where
                 .collect(),
             y_vec.iter().copied().hadamard(s_r).collect(),
         ];
-        VectorPolynomial::new(coeffs, n_bits)
+        VectorPolynomial::new(coeffs, n_bits as usize)
     };
 
     let tao1: G::ScalarField = UniformRand::rand(rng);
@@ -187,12 +187,12 @@ where
     let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
         Some(*succ * G::ScalarField::from(2u64))
     })
-    .take(n_bits)
+    .take(n_bits as usize)
     .collect();
 
     let y_vec: Vec<G::ScalarField> =
         successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n_bits)
+            .take(n_bits as usize)
             .collect();
 
     let (g, msm) = rayon::join(
@@ -209,8 +209,8 @@ where
                 - (statement.v.mul(z.square()) + tt1.mul(x) + tt2.mul(x.square()))
         },
         || {
-            let gs = &crs.ipa_crs.gs[0..n_bits];
-            let hs = &crs.ipa_crs.hs[0..n_bits];
+            let gs = &crs.ipa_crs.gs[0..n_bits as usize];
+            let hs = &crs.ipa_crs.hs[0..n_bits as usize];
             let scaled_hs = create_hs_prime::<G>(hs, y);
             let hs_prime = G::normalize_batch(
                 &scaled_hs
@@ -223,7 +223,7 @@ where
                 a + s.mul(x) + {
                     let bases: Vec<G::Affine> = gs.iter().chain(hs_prime.iter()).copied().collect();
                     let scalars: Vec<G::ScalarField> = {
-                        let neg_z = std::iter::repeat_n(-z, n_bits);
+                        let neg_z = std::iter::repeat_n(-z, n_bits as usize);
                         let hs_scalars = y_vec
                             .iter()
                             .copied()
@@ -238,7 +238,7 @@ where
             let extended_statement = ipa_types::extended::Statement {
                 p: p + crs.h.mul(-mu),
                 c: t_hat,
-                witness_size: n_bits as u64,
+                witness_size: n_bits,
             };
 
             let mut msm = extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
@@ -287,10 +287,10 @@ mod tests_range {
     proptest! {
           #![proptest_config(Config::with_cases(4))]
           #[test]
-        fn test_range_proof(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
+        fn test_range_proof(n in prop_oneof![Just(2u64), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
 
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(n, &mut rng);
+            let crs: CRS<Projective> = CRS::rand(n as usize, &mut rng);
             // pick a random Fr value in the range [0, 2^n) via bigint conversion
             let max_value = (1u128 << n) - 1;
             let v = Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value));
@@ -314,10 +314,10 @@ mod tests_range {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_batch_range_proof_verify_works(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32)]) {
+      fn test_batch_range_proof_verify_works(n in prop_oneof![Just(2u64), Just(4), Just(8), Just(16), Just(32)]) {
 
         let mut rng = OsRng;
-        let crs: CRS<Projective> = CRS::rand(n, &mut rng);
+        let crs: CRS<Projective> = CRS::rand(n as usize, &mut rng);
 
         let witnesses = (0..4).map(|_| {
             let max_value = (1u128 << n) - 1;

@@ -23,7 +23,7 @@ const BATCH_SIZE: usize = 100;
 fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
     c: &mut Criterion,
     crs: &RangeCRS<Projective>,
-    n_bits: usize,
+    n_bits: u64,
     m: usize,
     rng: &mut Rng,
 ) {
@@ -45,7 +45,7 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
             let statement = range_types::aggregate::Statement::<Projective>::new(crs, &witness);
 
             let domain_separator =
-                spongefish::domain_separator!("aggregate-range-benchmark").instance(&statement.v);
+                spongefish::domain_separator!("aggregate-range-benchmark").instance(&statement);
             let prover_state = domain_separator.std_prover();
 
             let proof = aggregate_prove::<Projective, _>(prover_state, crs, &witness, rng);
@@ -58,7 +58,7 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
         b.iter(|| {
             let (statement, proof_data) = proofs.choose(rng).unwrap();
             let domain_separator =
-                spongefish::domain_separator!("aggregate-range-benchmark").instance(&statement.v);
+                spongefish::domain_separator!("aggregate-range-benchmark").instance(statement);
             let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
             aggregate_verify::<Projective, _>(&mut verifier_state, crs, statement, rng).unwrap();
         })
@@ -73,7 +73,7 @@ fn bench_aggregate_range_prove_verify_cycle<Rng: rand::Rng>(
                 .map(|(statement, ProofData { proof })| {
                     let domain_separator =
                         spongefish::domain_separator!("aggregate-range-benchmark")
-                            .instance(&statement.v);
+                            .instance(statement);
                     let mut verifier_state = domain_separator.std_verifier(proof);
                     verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
                 })
