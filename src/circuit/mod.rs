@@ -75,10 +75,7 @@ where
     );
 
     prover_state.prover_messages(&[a_i, a_o, s]);
-    let [y, z]: [G::ScalarField; 2] = [
-        prover_state.verifier_message(),
-        prover_state.verifier_message(),
-    ];
+    let [y, z]: [G::ScalarField; 2] = prover_state.verifier_messages();
 
     let (y_vec, y_inv_vec) = {
         let y_inv = y.inverse().expect("nonzero y");

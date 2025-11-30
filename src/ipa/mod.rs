@@ -8,8 +8,6 @@ use crate::{
     vector_ops::{VectorOps, inner_product},
 };
 use ark_ec::{CurveGroup, PrimeGroup};
-#[cfg(test)]
-use ark_ff::Zero;
 use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
 use rayon::prelude::*;
@@ -238,7 +236,6 @@ fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
 #[cfg(test)]
 mod tests_proof {
     use super::*;
-    // ExtendedBulletproofDomainSeparator trait removed - no longer needed with spongefish API
     use crate::ipa::types::{self as ipa_types, CrsSize};
     use crate::msm::verify_batch_aux;
     use ark_vesta::{self, Projective};
@@ -274,37 +271,17 @@ mod tests_proof {
             }
 
             {
+                let statement: ipa_types::extended::Statement<Projective> = witness.extended_statement(&crs);
 
-              let statement: ipa_types::extended::Statement<Projective> = witness.extended_statement(&crs);
+                let domain_separator =
+                    spongefish::domain_separator!("test-ipa-extended")
+                        .instance(&statement);
 
-              let domain_separator =
-                  spongefish::domain_separator!("extended-bulletproofs")
-                      .instance(&statement);
+                let mut prover_state = domain_separator.std_prover();
+                let proof = crate::ipa::extended::prove(&mut prover_state, &crs, &statement, &witness);
 
-              let mut prover_state = domain_separator.std_prover();
-              let x: <Projective as PrimeGroup>::ScalarField = prover_state.verifier_message();
-              let adjusted_statement = ipa_types::Statement {
-                  p: statement.p + crs.u.mul(x * statement.c),
-                  witness_size: witness.size() as u64,
-              };
-              let crs_mod = CRS {
-                  gs: crs.gs.clone(),
-                  hs: crs.hs.clone(),
-                  u: crs.u.mul(x).into_affine(),
-              };
-              let narg_string = prove(&mut prover_state, &crs_mod, adjusted_statement, &witness);
-
-              let mut verifier_state = domain_separator.std_verifier(&narg_string);
-              let x_verifier: <Projective as PrimeGroup>::ScalarField = verifier_state.verifier_message();
-              let adjusted_statement_verifier = ipa_types::Statement {
-                  p: statement.p + crs.u.mul(x_verifier * statement.c),
-                  witness_size: statement.witness_size,
-              };
-              let mut msm = verify_aux(&mut verifier_state, &crs, &adjusted_statement_verifier).expect("verify_aux should succeed");
-              msm.scale_elem(crs.u, x_verifier);
-              let g = msm.execute();
-              assert!(g.is_zero(), "proof should verify");
-
+                let mut verifier_state = domain_separator.std_verifier(&proof);
+                crate::ipa::extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
             }
 
       }

@@ -79,10 +79,7 @@ where
         )
     };
     prover_state.prover_messages(&[a, s]);
-    let [y, z]: [G::ScalarField; 2] = [
-        prover_state.verifier_message(),
-        prover_state.verifier_message(),
-    ];
+    let [y, z]: [G::ScalarField; 2] = prover_state.verifier_messages();
     let y_vec: Vec<G::ScalarField> =
         successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
             .take(n_bits as usize)
