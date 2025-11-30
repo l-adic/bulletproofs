@@ -16,9 +16,6 @@ use crate::{
 
 pub mod types;
 
-// Domain separator traits are no longer needed with the new spongefish API.
-// Spongefish handles transcript management internally.
-
 pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
     prover_state: &mut ProverState,
     crs: &types::CRS<G>,

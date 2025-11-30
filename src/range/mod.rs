@@ -22,9 +22,6 @@ use crate::{
     vector_ops::{VectorOps, sum},
 };
 
-// Domain separator traits are no longer needed with the new spongefish API.
-// Spongefish handles transcript management internally.
-
 #[instrument(skip_all, fields(nbits = witness.n_bits), level = "debug")]
 pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
     mut prover_state: ProverState,

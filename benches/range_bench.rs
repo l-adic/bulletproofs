@@ -31,8 +31,6 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
-    // Domain separator will be created per proof using the new API
-
     let mut proofs: BoundedProofQueue<(RangeStatement<Projective>, ProofData)> =
         BoundedProofQueue::new(500);
 

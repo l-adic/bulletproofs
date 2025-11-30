@@ -17,9 +17,6 @@ use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::ops::Mul;
 use tracing::instrument;
 
-// Domain separator traits are no longer needed with the new spongefish API.
-// The domain_separator! macro and instance() method handle all transcript management automatically.
-
 #[instrument(skip_all, fields(witness_size = witness.a.len()), level = "debug")]
 pub fn prove<G: CurveGroup + Encoding>(
     prover_state: &mut ProverState,

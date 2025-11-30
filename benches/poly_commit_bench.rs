@@ -37,8 +37,6 @@ fn bench_single_poly_commit<Rng: rand::Rng>(
 
     let poly_degree = crs.size() - 1;
 
-    // Domain separator will be created per proof using the new API
-
     let mut proofs: BoundedProofQueue<ProofData> = BoundedProofQueue::new(500);
 
     group.bench_with_input(

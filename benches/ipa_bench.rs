@@ -33,8 +33,6 @@ fn bench_ipa_prove_verify_cycle<Rng: rand::Rng>(
 
     let witness_size = 2_usize.pow(witness_log2_size as u32);
 
-    // Domain separator will be created per proof using the new API
-
     let mut proofs: BoundedProofQueue<(IpaStatement<Projective>, ProofData)> =
         BoundedProofQueue::new(500);
 

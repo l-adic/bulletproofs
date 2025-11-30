@@ -13,9 +13,6 @@ use rayon::prelude::*;
 use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::{marker::PhantomData, ops::Mul};
 
-// Domain separator traits are no longer needed with the new spongefish API.
-// Spongefish handles transcript management internally.
-
 fn powers_of_x<F: Field>(x: F) -> impl Iterator<Item = F> {
     (0..).scan(F::one(), move |state, _| {
         let current = *state;

@@ -32,8 +32,6 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
 
-    // Domain separator will be created per proof using the new API
-
     let mut proofs: BoundedProofQueue<(Circuit<Fr>, CircuitStatement<Projective>, ProofData)> =
         BoundedProofQueue::new(500);
 
@@ -57,7 +55,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
         },
     );
 
-    // Benchmark verify using the same domain separator and pre-generated proof
+    // Benchmark verify
     group.bench_with_input(
         BenchmarkId::new("verify", format!("{n}_{q}")),
         &(n, q),

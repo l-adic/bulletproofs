@@ -12,9 +12,6 @@ use crate::{
     msm::Msm,
 };
 
-// Extended domain separator traits are no longer needed with the new spongefish API.
-// The domain_separator! macro handles all transcript management automatically.
-
 pub fn prove<G: CurveGroup + Encoding>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,

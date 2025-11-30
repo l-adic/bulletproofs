@@ -19,9 +19,6 @@ use crate::{
     vector_ops::inner_product,
 };
 
-// Domain separator traits are no longer needed with the new spongefish API.
-// Spongefish handles transcript management internally.
-
 #[instrument(skip_all, fields(n_bits = witness.n_bits, m = witness.len()), level = "debug")]
 pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
     mut prover_state: ProverState,
