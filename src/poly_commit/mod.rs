@@ -1,49 +1,17 @@
 pub mod types;
 
+use crate::BulletproofResult;
 use crate::{
     poly_commit::types::{CRS, PolyCommit, Statement, Witness},
     vector_ops::inner_product,
 };
-use ark_ec::CurveGroup;
+use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{Field, UniformRand, Zero, batch_inversion};
 use ark_poly::{polynomial::DenseUVPolynomial, univariate::DensePolynomial};
 use ark_std::log2;
 use rayon::prelude::*;
-use spongefish::{
-    DomainSeparator, ProofResult, ProverState, VerifierState,
-    codecs::arkworks_algebra::{
-        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
-        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
-    },
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::{marker::PhantomData, ops::Mul};
-
-pub trait OpeningProofDomainSeparator<G: CurveGroup> {
-    fn opening_proof_statement(self) -> Self;
-    fn add_opening_proof(self, len: usize) -> Self;
-}
-
-impl<G> OpeningProofDomainSeparator<G> for DomainSeparator
-where
-    G: CurveGroup,
-    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-{
-    fn opening_proof_statement(self) -> Self {
-        self.add_points(1, "commitment")
-            .add_scalars(1, "point")
-            .add_scalars(1, "evalutation")
-    }
-
-    fn add_opening_proof(mut self, len: usize) -> Self {
-        self = self.challenge_scalars(1, "u_coeff");
-        for _ in 0..log2(len) {
-            self = self
-                .add_points(2, "round-message")
-                .challenge_scalars(1, "challenge");
-        }
-        self.add_scalars(2, "final-message")
-    }
-}
 
 fn powers_of_x<F: Field>(x: F) -> impl Iterator<Item = F> {
     (0..).scan(F::one(), move |state, _| {
@@ -74,15 +42,18 @@ fn fold_generators<G: CurveGroup>(
     G::normalize_batch(&gs)
 }
 
-pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng>(
+pub fn prove<G: CurveGroup + Encoding, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     witness: &Witness<G, P>,
     rng: &mut Rng,
-) -> ProofResult<Todo<G>> {
+) -> Todo<G>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let u: G = {
-        let [u_coeff]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let u_coeff: G::ScalarField = prover_state.verifier_message();
         G::generator().mul(u_coeff)
     };
 
@@ -115,9 +86,9 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
             },
         );
 
-        prover_state.add_points(&[left_j, right_j])?;
+        prover_state.prover_messages(&[left_j, right_j]);
 
-        let [u_j]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let u_j: G::ScalarField = prover_state.verifier_message();
         ui.push(u_j);
         let u_j_inv = u_j.inverse().expect("non-zero u_j");
 
@@ -133,7 +104,7 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
         r += l_j * u_j.square() + r_j * u_j_inv.square();
     }
 
-    prover_state.add_scalars(&[a[0], r])?;
+    prover_state.prover_messages(&[a[0], r]);
     {
         let h_poly = HPoly { ui: ui.clone() };
         let ss = h_poly.coeffs();
@@ -141,34 +112,37 @@ pub fn prove<G: CurveGroup, P: DenseUVPolynomial<G::ScalarField>, Rng: rand::Rng
         assert_eq!(g[0], g_comp.into_affine(), "Gs NEQ")
     }
 
-    Ok(Todo {
+    Todo {
         g: PolyCommit { g: g[0].into() },
         h_poly: HPoly { ui },
-    })
+    }
 }
 
-pub fn verify<G: CurveGroup>(
+pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<()> {
+) -> BulletproofResult<()>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let n = crs.size();
     let log2_n = log2(n) as usize;
 
     let u: G = {
-        let [u_coeff]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        let u_coeff: G::ScalarField = verifier_state.verifier_message();
         G::generator().mul(u_coeff)
     };
 
     let p_prime = statement.commitment.g + u.mul(statement.evaluation);
 
     let transcript = (0..log2_n)
-        .map(|_| {
-            let [left, right]: [G; 2] = verifier_state.next_points()?;
-            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        .map(|_| -> BulletproofResult<((G, G), G::ScalarField)> {
+            let [left, right]: [G; 2] = verifier_state.prover_messages()?;
+            let x: G::ScalarField = verifier_state.verifier_message();
             Ok(((left, right), x))
         })
-        .collect::<ProofResult<Vec<_>>>()?;
+        .collect::<BulletproofResult<Vec<_>>>()?;
 
     let q: G = transcript.iter().fold(p_prime, |acc, ((l_j, r_j), u_j)| {
         let u_j_inv = u_j.inverse().expect("non zero u_j");
@@ -188,11 +162,14 @@ pub fn verify<G: CurveGroup>(
         inner_product(ss, b)
     };
 
-    let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+    let [a, r]: [G::ScalarField; 2] = verifier_state.prover_messages()?;
     let res = g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
 
-    assert!(res.is_zero(), "Q equality");
-    Ok(())
+    if res.is_zero() {
+        Ok(())
+    } else {
+        Err(crate::VerificationError)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -284,30 +261,33 @@ pub fn fold_todos_statement<G: CurveGroup>(
         .expect("Non empty statement list")
 }
 
-pub fn lazy_verify<G: CurveGroup>(
+pub fn lazy_verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     assumption: PolyCommit<G>,
     mut todos: Vec<Todo<G>>,
-) -> ProofResult<Vec<Todo<G>>> {
+) -> BulletproofResult<Vec<Todo<G>>>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let n = crs.size();
     let log2_n = log2(n) as usize;
 
     let u: G = {
-        let [u_coeff]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        let u_coeff: G::ScalarField = verifier_state.verifier_message();
         G::generator().mul(u_coeff)
     };
 
     let p_prime = statement.commitment.g + u.mul(statement.evaluation);
 
     let transcript = (0..log2_n)
-        .map(|_| {
-            let [left, right]: [G; 2] = verifier_state.next_points()?;
-            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+        .map(|_| -> BulletproofResult<((G, G), G::ScalarField)> {
+            let [left, right]: [G; 2] = verifier_state.prover_messages()?;
+            let x: G::ScalarField = verifier_state.verifier_message();
             Ok(((left, right), x))
         })
-        .collect::<ProofResult<Vec<_>>>()?;
+        .collect::<BulletproofResult<Vec<_>>>()?;
 
     let q: G = transcript.iter().fold(p_prime, |acc, ((l_j, r_j), u_j)| {
         let u_j_inv = u_j.inverse().expect("non zero u_j");
@@ -320,10 +300,12 @@ pub fn lazy_verify<G: CurveGroup>(
 
     let b = h_poly.evaluate(statement.x);
 
-    let [a, r]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+    let [a, r]: [G::ScalarField; 2] = verifier_state.prover_messages()?;
     let res = assumption.g.mul(a) + crs.h.mul(r) + u.mul(a * b) - q;
 
-    assert!(res.is_zero(), "Q equality");
+    if !res.is_zero() {
+        return Err(crate::VerificationError);
+    }
     let todo = Todo {
         g: assumption,
         h_poly,
@@ -359,8 +341,7 @@ mod test_hpoly {
 
         assert_eq!(
             eval_result, inner_result,
-            "HPoly evaluation mismatch: eval={:?}, inner={:?}",
-            eval_result, inner_result
+            "HPoly evaluation mismatch: eval={eval_result:?}, inner={inner_result:?}"
         );
     }
 }
@@ -375,60 +356,27 @@ mod tests_proof {
     use ark_std::UniformRand;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
-    use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
-    use spongefish::{DomainSeparator, ProofError};
     use std::ops::Add;
 
     type Fr =
         <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
 
-    pub fn prove_verify<G: CurveGroup>(
+    pub fn prove_verify<G: CurveGroup + Encoding + NargDeserialize>(
         crs: &CRS<G>,
         witness: &Witness<G, DensePolynomial<G::ScalarField>>,
         statement: &Statement<G>,
         rng: &mut OsRng,
-    ) -> ProofResult<()> {
-        let domain_separator = {
-            let domain_separator = DomainSeparator::new("test-poly-comm");
-            // add the IO of the bulletproof statement
-            let domain_separator =
-                OpeningProofDomainSeparator::<Projective>::opening_proof_statement(
-                    domain_separator,
-                )
-                .ratchet();
-            // add the IO of the bulletproof protocol (the transcript)
-            OpeningProofDomainSeparator::<Projective>::add_opening_proof(
-                domain_separator,
-                witness.size(),
-            )
-        };
+    ) -> crate::BulletproofResult<()>
+    where
+        <G as PrimeGroup>::ScalarField: Codec,
+    {
+        let domain_separator = spongefish::domain_separator!("test-poly-comm").instance(statement);
 
-        let mut prover_state = domain_separator.to_prover_state();
-        let proof = {
-            prover_state
-                .public_points(&[statement.commitment.g])
-                .unwrap();
-            prover_state.public_scalars(&[statement.x]).unwrap();
-            prover_state
-                .public_scalars(&[statement.evaluation])
-                .unwrap();
-            prover_state.ratchet().unwrap();
-            prove(&mut prover_state, crs, statement, witness, rng)
-                .expect("proof should be generated");
-            prover_state.narg_string()
-        };
+        let mut prover_state = domain_separator.std_prover();
+        let _ = prove(&mut prover_state, crs, statement, witness, rng);
+        let proof = prover_state.narg_string().to_vec();
 
-        let mut verifier_state = domain_separator.to_verifier_state(proof);
-        verifier_state
-            .public_points(&[statement.commitment.g])
-            .expect("cannot add statement");
-        verifier_state
-            .public_scalars(&[statement.x])
-            .expect("cannot add statement");
-        verifier_state
-            .public_scalars(&[statement.evaluation])
-            .expect("cannot add statement");
-        verifier_state.ratchet().expect("failed to ratchet");
+        let mut verifier_state = domain_separator.std_verifier(&proof);
         verify(&mut verifier_state, crs, statement)
     }
 
@@ -458,8 +406,6 @@ mod tests_proof {
             let statement = statement1.mul(alpha1).add(statement2.mul(alpha2));
             assert_eq!(statement, witness.statement(&crs, statement1.x), "statements are linear");
             prove_verify(&crs, &witness, &statement, &mut rng).expect("linear");
-
-
       }
     }
 
@@ -483,39 +429,22 @@ mod tests_proof {
 
           (crs, witnesses, points)
       })) {
-            let domain_separator = DomainSeparator::new("test-poly-comm");
-            let domain_separator = OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator.clone()).ratchet();
-            let domain_separator = OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size());
-
             let proofs = points.par_iter().zip(witnesses.par_iter()).map(|(&x, witness)| {
-                let mut prover_state = domain_separator.to_prover_state();
                 let statement = witness.statement(&crs, x);
-                prover_state
-                    .public_points(&[statement.commitment.g])
-                    .unwrap();
-                prover_state.public_scalars(&[statement.x]).unwrap();
-                prover_state
-                    .public_scalars(&[statement.evaluation])
-                    .unwrap();
-                prover_state.ratchet().unwrap();
-                let proof = prove(&mut prover_state, &crs, &statement, witness, &mut OsRng)?;
-                Ok((prover_state.narg_string().to_vec(), statement, proof))
-            }).collect::<Result<Vec<_>, ProofError>>()?;
+                let domain_separator = spongefish::domain_separator!("test-poly-comm")
+                    .instance(&statement);
+                let mut prover_state = domain_separator.std_prover();
+                let proof_todo = prove(&mut prover_state, &crs, &statement, witness, &mut OsRng);
+                let proof = prover_state.narg_string().to_vec();
+                Ok((proof, statement, proof_todo))
+            }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
 
             let verifier_todos = proofs.iter().try_fold(Vec::new(), |todos, (proof, statement, prover_todo)| {
-                let mut verifier_state = domain_separator.to_verifier_state(proof);
-                verifier_state
-                    .public_points(&[statement.commitment.g])
-                    .expect("cannot add statement");
-                verifier_state
-                    .public_scalars(&[statement.x])
-                    .expect("cannot add statement");
-                verifier_state
-                    .public_scalars(&[statement.evaluation])
-                    .expect("cannot add statement");
-                verifier_state.ratchet().expect("failed to ratchet");
+                let domain_separator = spongefish::domain_separator!("test-poly-comm")
+                    .instance(statement);
+                let mut verifier_state = domain_separator.std_verifier(proof);
                 lazy_verify(&mut verifier_state, &crs, statement, prover_todo.g, todos)
-            })?;
+            }).unwrap();
 
             let prover_todos: Vec<Todo<Projective>> = proofs.iter().map(|(_,_,todo)| todo).cloned().collect();
 
@@ -530,7 +459,7 @@ mod tests_proof {
                 assert_eq!(prover_statement, statement, "Statements match");
             }
 
-            prove_verify(&crs, &witness, &statement, &mut OsRng)?;
+            prove_verify(&crs, &witness, &statement, &mut OsRng).unwrap();
       }
     }
 }

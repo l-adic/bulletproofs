@@ -1,7 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::{One, UniformRand};
 use nonempty::NonEmpty;
-use spongefish::{ProofError, ProofResult};
+use spongefish::{VerificationError, VerificationResult};
 use std::{collections::HashMap, iter::successors};
 use tracing::instrument;
 
@@ -91,7 +91,7 @@ impl<G: CurveGroup> Msm<G> {
 pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
     proofs: NonEmpty<Msm<G>>,
     rng: &mut Rng,
-) -> ProofResult<()> {
+) -> VerificationResult<()> {
     let alpha = G::ScalarField::rand(rng);
     let powers_of_alpha = successors(Some(G::ScalarField::one()), |state| Some(*state * alpha));
     let combined_msm = proofs
@@ -110,6 +110,6 @@ pub fn verify_batch_aux<G: CurveGroup, Rng: rand::Rng>(
     if g.is_zero() {
         Ok(())
     } else {
-        Err(ProofError::InvalidProof)
+        Err(VerificationError)
     }
 }

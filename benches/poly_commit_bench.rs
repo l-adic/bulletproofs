@@ -1,13 +1,12 @@
 pub mod common;
 
 use ark_ec::PrimeGroup;
+use ark_ff::UniformRand;
 use ark_poly::univariate::DensePolynomial;
 use ark_secp256k1::Projective;
-use ark_std::UniformRand;
 use bulletproofs::{
     ipa::types::CrsSize,
     poly_commit::{
-        OpeningProofDomainSeparator, Todo, fold_todos_statement, fold_todos_witness, lazy_verify,
         prove as poly_prove,
         types::{CRS, Statement, Witness},
         verify as poly_verify,
@@ -16,17 +15,13 @@ use bulletproofs::{
 use common::BoundedProofQueue;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use rand::rngs::OsRng;
-use spongefish::{
-    DomainSeparator,
-    codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit},
-};
 
 type Fr = <ark_ec::short_weierstrass::Projective<ark_secp256k1::Config> as PrimeGroup>::ScalarField;
 
 struct ProofData {
     proof: Vec<u8>,
     statement: Statement<Projective>,
-    todo: Todo<Projective>,
+    todo: bulletproofs::poly_commit::Todo<Projective>,
 }
 
 const BATCH_SIZES: &[usize] = &[10, 100];
@@ -36,21 +31,13 @@ fn bench_single_poly_commit<Rng: rand::Rng>(
     crs_log2_size: usize,
     crs: &CRS<Projective>,
     rng: &mut Rng,
-) -> BoundedProofQueue<(ProofData, DomainSeparator)> {
+) -> BoundedProofQueue<ProofData> {
     let mut group = c.benchmark_group("poly_commit_single");
     group.sample_size(10);
 
     let poly_degree = crs.size() - 1;
 
-    let domain_separator = {
-        let domain_separator = DomainSeparator::new("poly-commit-benchmark");
-        let domain_separator =
-            OpeningProofDomainSeparator::<Projective>::opening_proof_statement(domain_separator)
-                .ratchet();
-        OpeningProofDomainSeparator::<Projective>::add_opening_proof(domain_separator, crs.size())
-    };
-
-    let mut proofs: BoundedProofQueue<(ProofData, DomainSeparator)> = BoundedProofQueue::new(500);
+    let mut proofs: BoundedProofQueue<ProofData> = BoundedProofQueue::new(500);
 
     group.bench_with_input(
         BenchmarkId::new("prove", crs_log2_size),
@@ -62,23 +49,17 @@ fn bench_single_poly_commit<Rng: rand::Rng>(
                 let x = Fr::rand(rng);
                 let statement = witness.statement(crs, x);
 
-                let mut prover_state = domain_separator.to_prover_state();
-                prover_state
-                    .public_points(&[statement.commitment.g])
-                    .unwrap();
-                prover_state.public_scalars(&[statement.x]).unwrap();
-                prover_state
-                    .public_scalars(&[statement.evaluation])
-                    .unwrap();
-                prover_state.ratchet().unwrap();
+                let domain_separator =
+                    spongefish::domain_separator!("poly-commit-benchmark").instance(&statement);
+                let mut prover_state = domain_separator.std_prover();
 
-                let todo = poly_prove(&mut prover_state, crs, &statement, &witness, rng).unwrap();
+                let todo = poly_prove(&mut prover_state, crs, &statement, &witness, rng);
                 let proof_data = ProofData {
                     proof: prover_state.narg_string().to_vec(),
                     statement,
                     todo,
                 };
-                proofs.push((proof_data, domain_separator.clone()));
+                proofs.push(proof_data);
             })
         },
     );
@@ -88,18 +69,10 @@ fn bench_single_poly_commit<Rng: rand::Rng>(
         &crs_log2_size,
         |b, _| {
             b.iter(|| {
-                let (proof_data, domain_separator) = proofs.choose(rng).unwrap();
-                let mut verifier_state = domain_separator.to_verifier_state(&proof_data.proof);
-                verifier_state
-                    .public_points(&[proof_data.statement.commitment.g])
-                    .unwrap();
-                verifier_state
-                    .public_scalars(&[proof_data.statement.x])
-                    .unwrap();
-                verifier_state
-                    .public_scalars(&[proof_data.statement.evaluation])
-                    .unwrap();
-                verifier_state.ratchet().unwrap();
+                let proof_data = proofs.choose(rng).unwrap();
+                let domain_separator = spongefish::domain_separator!("poly-commit-benchmark")
+                    .instance(&proof_data.statement);
+                let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
                 poly_verify(&mut verifier_state, crs, &proof_data.statement).unwrap();
             })
         },
@@ -113,7 +86,7 @@ fn bench_aggregated_poly_commit<Rng: rand::Rng>(
     c: &mut Criterion,
     crs_log2_size: usize,
     crs: &CRS<Projective>,
-    proofs_queue: &BoundedProofQueue<(ProofData, DomainSeparator)>,
+    proofs_queue: &BoundedProofQueue<ProofData>,
     rng: &mut Rng,
 ) {
     let mut group = c.benchmark_group("poly_commit_aggregated");
@@ -123,7 +96,7 @@ fn bench_aggregated_poly_commit<Rng: rand::Rng>(
         group.bench_with_input(
             BenchmarkId::new(
                 "lazy_verify_and_aggregate",
-                format!("{}_batch_{}", crs_log2_size, batch_size),
+                format!("{crs_log2_size}_batch_{batch_size}"),
             ),
             &batch_size,
             |b, _| {
@@ -131,24 +104,16 @@ fn bench_aggregated_poly_commit<Rng: rand::Rng>(
                     // Select random batch of proofs from the queue
                     let selected_proofs = proofs_queue.choose_multiple(rng, batch_size);
 
-                    // Lazy verify all proofs in the batch
-                    let todos = selected_proofs
+                    // Accumulate todos using lazy_verify for actual batch verification
+                    let verifier_todos = selected_proofs
                         .iter()
-                        .try_fold(Vec::new(), |todos, (proof_data, domain_separator)| {
+                        .try_fold(Vec::new(), |todos, proof_data| {
+                            let domain_separator =
+                                spongefish::domain_separator!("poly-commit-benchmark")
+                                    .instance(&proof_data.statement);
                             let mut verifier_state =
-                                domain_separator.to_verifier_state(&proof_data.proof);
-                            verifier_state
-                                .public_points(&[proof_data.statement.commitment.g])
-                                .unwrap();
-                            verifier_state
-                                .public_scalars(&[proof_data.statement.x])
-                                .unwrap();
-                            verifier_state
-                                .public_scalars(&[proof_data.statement.evaluation])
-                                .unwrap();
-                            verifier_state.ratchet().unwrap();
-
-                            lazy_verify(
+                                domain_separator.std_verifier(&proof_data.proof);
+                            bulletproofs::poly_commit::lazy_verify(
                                 &mut verifier_state,
                                 crs,
                                 &proof_data.statement,
@@ -158,52 +123,39 @@ fn bench_aggregated_poly_commit<Rng: rand::Rng>(
                         })
                         .unwrap();
 
-                    // Aggregate and verify the final proof
-                    if !todos.is_empty() {
-                        let alpha = Fr::rand(rng);
-                        let x = Fr::rand(rng);
-                        let amortized_witness = fold_todos_witness(&todos, alpha);
-                        let amortized_statement = fold_todos_statement(&todos, alpha, x);
+                    // Extract prover todos for comparison and folding
+                    let prover_todos: Vec<bulletproofs::poly_commit::Todo<Projective>> =
+                        selected_proofs
+                            .iter()
+                            .map(|proof_data| proof_data.todo.clone())
+                            .collect();
 
-                        // Use the domain separator from the first proof
-                        let domain_separator = &selected_proofs[0].1;
+                    // Verify todos match (this would be an assertion in tests)
+                    assert_eq!(prover_todos, verifier_todos);
 
-                        // Final verification of aggregated proof
-                        let mut prover_state = domain_separator.to_prover_state();
-                        prover_state
-                            .public_points(&[amortized_statement.commitment.g])
-                            .unwrap();
-                        prover_state
-                            .public_scalars(&[amortized_statement.x])
-                            .unwrap();
-                        prover_state
-                            .public_scalars(&[amortized_statement.evaluation])
-                            .unwrap();
-                        prover_state.ratchet().unwrap();
+                    // Perform actual batch verification using the accumulated todos
+                    let alpha = ark_ff::UniformRand::rand(&mut *rng);
+                    let x = ark_ff::UniformRand::rand(&mut *rng);
+                    let witness =
+                        bulletproofs::poly_commit::fold_todos_witness(&prover_todos, alpha);
+                    let statement =
+                        bulletproofs::poly_commit::fold_todos_statement(&verifier_todos, alpha, x);
 
-                        let _ = poly_prove(
-                            &mut prover_state,
-                            crs,
-                            &amortized_statement,
-                            &amortized_witness,
-                            rng,
-                        )
+                    // Final batched proof verification
+                    let domain_separator =
+                        spongefish::domain_separator!("poly-commit-benchmark").instance(&statement);
+                    let mut prover_state = domain_separator.std_prover();
+                    let _final_todo = bulletproofs::poly_commit::prove(
+                        &mut prover_state,
+                        crs,
+                        &statement,
+                        &witness,
+                        &mut *rng,
+                    );
+                    let proof = prover_state.narg_string().to_vec();
+                    let mut verifier_state = domain_separator.std_verifier(&proof);
+                    bulletproofs::poly_commit::verify(&mut verifier_state, crs, &statement)
                         .unwrap();
-
-                        let mut verifier_state =
-                            domain_separator.to_verifier_state(prover_state.narg_string());
-                        verifier_state
-                            .public_points(&[amortized_statement.commitment.g])
-                            .unwrap();
-                        verifier_state
-                            .public_scalars(&[amortized_statement.x])
-                            .unwrap();
-                        verifier_state
-                            .public_scalars(&[amortized_statement.evaluation])
-                            .unwrap();
-                        verifier_state.ratchet().unwrap();
-                        poly_verify(&mut verifier_state, crs, &amortized_statement).unwrap();
-                    }
 
                     black_box(())
                 })

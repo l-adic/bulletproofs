@@ -1,10 +1,10 @@
+use crate::vector_ops::{VectorOps, inner_product};
 use ark_ec::CurveGroup;
 use ark_ff::UniformRand;
 use proptest::prelude::*;
 use rand::rngs::OsRng;
+use spongefish::Encoding;
 use std::ops::{Add, Mul};
-
-use crate::vector_ops::{VectorOps, inner_product};
 
 #[derive(Clone, Debug)]
 pub struct CRS<G: CurveGroup> {
@@ -45,7 +45,7 @@ impl<G: CurveGroup> CRS<G> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Encoding)]
 pub struct Witness<G: CurveGroup> {
     pub a: Vec<G::ScalarField>,
     pub b: Vec<G::ScalarField>,
@@ -83,7 +83,7 @@ impl<G: CurveGroup> Witness<G> {
         let p: G = g.add(&h).add(&crs.u.mul(self.c));
         Statement {
             p,
-            witness_size: self.size(),
+            witness_size: self.size() as u64,
         }
     }
 
@@ -106,7 +106,7 @@ impl<G: CurveGroup> Witness<G> {
         extended::Statement {
             p,
             c: self.c(),
-            witness_size: self.size(),
+            witness_size: self.size() as u64,
         }
     }
 }
@@ -137,10 +137,10 @@ impl<G: CurveGroup> Add for Witness<G> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encoding)]
 pub struct Statement<G: CurveGroup> {
     pub p: G,
-    pub witness_size: usize,
+    pub witness_size: u64,
 }
 
 impl<G: CurveGroup> Add for Statement<G> {
@@ -155,13 +155,21 @@ impl<G: CurveGroup> Add for Statement<G> {
     }
 }
 
+impl<G: CurveGroup + Encoding> Encoding for &Statement<G> {
+    fn encode(&self) -> impl AsRef<[u8]> {
+        (*self).encode()
+    }
+}
+
 pub mod extended {
     use ark_ec::CurveGroup;
+    use spongefish::Encoding;
 
+    #[derive(Clone, Copy, Debug, Encoding)]
     pub struct Statement<G: CurveGroup> {
         pub p: G,
         pub c: G::ScalarField,
-        pub witness_size: usize,
+        pub witness_size: u64,
     }
 
     pub struct Msm<G: CurveGroup> {

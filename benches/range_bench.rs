@@ -4,7 +4,7 @@ use ark_secp256k1::{Fr, Projective};
 use bulletproofs::{
     msm::verify_batch_aux,
     range::{
-        RangeProofDomainSeparator, prove as range_prove,
+        prove as range_prove,
         types::{CRS as RangeCRS, Statement as RangeStatement, Witness as RangeWitness},
         verify as range_verify, verify_aux,
     },
@@ -14,11 +14,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use nonempty::NonEmpty;
 use rand::rngs::OsRng;
 use rayon::prelude::*;
-use spongefish::{DomainSeparator, ProofError, codecs::arkworks_algebra::CommonGroupToUnit};
 
 struct ProofData {
     proof: Vec<u8>,
-    domain_separator: DomainSeparator,
 }
 
 const BATCH_SIZE: usize = 100;
@@ -26,20 +24,12 @@ const BATCH_SIZE: usize = 100;
 fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
     c: &mut Criterion,
     crs: &RangeCRS<Projective>,
-    n_bits: usize,
+    n_bits: u64,
     rng: &mut Rng,
 ) {
-    let mut group = c.benchmark_group(format!("range_{}", n_bits));
+    let mut group = c.benchmark_group(format!("range_{n_bits}"));
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(30));
-
-    let domain_separator = {
-        let domain_separator = DomainSeparator::new("range-benchmark");
-        let domain_separator =
-            RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
-                .ratchet();
-        RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n_bits)
-    };
 
     let mut proofs: BoundedProofQueue<(RangeStatement<Projective>, ProofData)> =
         BoundedProofQueue::new(500);
@@ -50,14 +40,13 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
             let v = Fr::from(rand::Rng::gen_range(rng, 0u128..=max_value));
             let witness = RangeWitness::<Fr>::new(v, n_bits, rng);
             let statement = RangeStatement::<Projective>::new(crs, &witness);
-            let mut prover_state = domain_separator.to_prover_state();
-            prover_state.public_points(&[statement.v]).unwrap();
-            prover_state.ratchet().unwrap();
-            let proof = range_prove::<Projective, _>(prover_state, crs, &witness, rng).unwrap();
-            let proof_data = ProofData {
-                proof: proof.clone(),
-                domain_separator: domain_separator.clone(),
-            };
+
+            let domain_separator =
+                spongefish::domain_separator!("range-benchmark").instance(&statement);
+            let prover_state = domain_separator.std_prover();
+
+            let proof = range_prove::<Projective, _>(prover_state, crs, &witness, rng);
+            let proof_data = ProofData { proof };
             proofs.push((statement, proof_data));
         })
     });
@@ -65,9 +54,9 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
     group.bench_with_input(BenchmarkId::new("verify", n_bits), &n_bits, |b, _| {
         b.iter(|| {
             let (statement, proof_data) = proofs.choose(rng).unwrap();
-            let mut verifier_state = domain_separator.to_verifier_state(&proof_data.proof);
-            verifier_state.public_points(&[statement.v]).unwrap();
-            verifier_state.ratchet().unwrap();
+            let domain_separator =
+                spongefish::domain_separator!("range-benchmark").instance(statement);
+            let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
             range_verify::<Projective, _>(&mut verifier_state, crs, statement, rng).unwrap();
         })
     });
@@ -78,21 +67,13 @@ fn bench_range_prove_verify_cycle<Rng: rand::Rng>(
 
             let verifications = selected_proofs
                 .into_par_iter()
-                .map(
-                    |(
-                        statement,
-                        ProofData {
-                            proof,
-                            domain_separator,
-                        },
-                    )| {
-                        let mut verifier_state = domain_separator.to_verifier_state(proof);
-                        verifier_state.public_points(&[statement.v])?;
-                        verifier_state.ratchet().unwrap();
-                        verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
-                    },
-                )
-                .collect::<Result<Vec<_>, ProofError>>()
+                .map(|(statement, ProofData { proof })| {
+                    let domain_separator =
+                        spongefish::domain_separator!("range-benchmark").instance(statement);
+                    let mut verifier_state = domain_separator.std_verifier(proof);
+                    verify_aux(&mut verifier_state, crs, statement, &mut OsRng)
+                })
+                .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 
             let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");

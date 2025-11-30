@@ -1,56 +1,30 @@
 pub mod extended;
 pub mod types;
 
+use crate::BulletproofResult;
 use crate::{
     ipa::types::{CRS, Statement, Witness},
     msm::Msm,
     vector_ops::{VectorOps, inner_product},
 };
-use ark_ec::CurveGroup;
+use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, batch_inversion};
 use ark_std::log2;
 use rayon::prelude::*;
-use spongefish::{
-    DomainSeparator, ProofError, ProofResult, ProverState, VerifierState,
-    codecs::arkworks_algebra::{
-        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
-        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
-    },
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState, VerifierState};
 use std::ops::Mul;
 use tracing::instrument;
 
-pub trait BulletproofDomainSeparator<G: CurveGroup> {
-    fn bulletproof_statement(self) -> Self;
-    fn add_bulletproof(self, len: usize) -> Self;
-}
-
-impl<G> BulletproofDomainSeparator<G> for DomainSeparator
-where
-    G: CurveGroup,
-    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-{
-    fn bulletproof_statement(self) -> Self {
-        self.add_points(1, "Pedersen commitment")
-    }
-
-    fn add_bulletproof(mut self, len: usize) -> Self {
-        for _ in 0..log2(len) {
-            self = self
-                .add_points(2, "round-message")
-                .challenge_scalars(1, "challenge");
-        }
-        self.add_scalars(2, "final-message")
-    }
-}
-
 #[instrument(skip_all, fields(witness_size = witness.a.len()), level = "debug")]
-pub fn prove<G: CurveGroup>(
+pub fn prove<G: CurveGroup + Encoding>(
     prover_state: &mut ProverState,
     crs: &CRS<G>,
     mut statement: Statement<G>,
     witness: &Witness<G>,
-) -> ProofResult<Vec<u8>> {
+) -> Vec<u8>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let mut n = witness.size();
     let mut gs: Vec<<G as CurveGroup>::Affine> = crs.gs[0..n].to_vec();
     let mut hs: Vec<<G as CurveGroup>::Affine> = crs.hs[0..n].to_vec();
@@ -98,9 +72,9 @@ pub fn prove<G: CurveGroup>(
             },
         );
 
-        prover_state.add_points(&[left, right])?;
+        prover_state.prover_message(&[left, right]);
 
-        let [alpha]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let alpha: G::ScalarField = prover_state.verifier_message();
         let alpha_inv = alpha.inverse().expect("non-zero alpha");
 
         let (new_gs, new_hs) = rayon::join(
@@ -120,31 +94,34 @@ pub fn prove<G: CurveGroup>(
         statement.p += left * alpha.square() + right * alpha_inv.square();
     }
 
-    prover_state.add_scalars(&[witness.a[0], witness.b[0]])?;
-    Ok(prover_state.narg_string().to_vec())
+    prover_state.prover_messages(&[witness.a[0], witness.b[0]]);
+    prover_state.narg_string().to_vec()
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
-pub fn verify_aux<G: CurveGroup>(
+pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<Msm<G>> {
+) -> BulletproofResult<Msm<G>>
+where
+    G::ScalarField: Codec,
+{
     let n = statement.witness_size;
-    let log2_n = log2(n) as usize;
+    let log2_n = log2(n as usize) as usize;
 
     let transcript = (0..log2_n)
         .map(|_| {
-            let [left, right]: [G; 2] = verifier_state.next_points()?;
-            let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
+            let [left, right]: [G; 2] = verifier_state.prover_message()?;
+            let x: G::ScalarField = verifier_state.verifier_message();
             Ok(((left, right), x))
         })
-        .collect::<ProofResult<Vec<_>>>()?;
+        .collect::<BulletproofResult<Vec<_>>>()?;
 
     let mut msm = Msm::new();
 
     {
-        let [a, b]: [G::ScalarField; 2] = verifier_state.next_scalars()?;
+        let [a, b]: [G::ScalarField; 2] = verifier_state.prover_messages()?;
         msm.upsert(crs.u, a * b);
 
         let challenge_powers: Vec<G::ScalarField> = transcript.iter().map(|&(_, x)| x).collect();
@@ -176,9 +153,14 @@ pub fn verify_aux<G: CurveGroup>(
             ss_inverse
         };
 
-        msm.upsert_batch(crs.gs[0..n].iter().copied().zip(ss.into_iter().scale(a)));
         msm.upsert_batch(
-            crs.hs[0..n]
+            crs.gs[0..(n as usize)]
+                .iter()
+                .copied()
+                .zip(ss.into_iter().scale(a)),
+        );
+        msm.upsert_batch(
+            crs.hs[0..(n as usize)]
                 .iter()
                 .copied()
                 .zip(ss_inverse.into_iter().scale(b)),
@@ -211,18 +193,21 @@ pub fn verify_aux<G: CurveGroup>(
 }
 
 #[instrument(skip_all, fields(crs_size = crs.size()), level = "debug")]
-pub fn verify<G: CurveGroup>(
+pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
-) -> ProofResult<()> {
+) -> BulletproofResult<()>
+where
+    G::ScalarField: Codec,
+{
     let proof = verify_aux(verifier_state, crs, statement)?;
     let (bases, scalars) = proof.bases_and_scalars();
     let g = G::msm_unchecked(&bases, &scalars);
     if g.is_zero() {
         Ok(())
     } else {
-        Err(ProofError::InvalidProof)
+        Err(crate::VerificationError)
     }
 }
 
@@ -251,15 +236,12 @@ fn fold_scalars<Fr: Field>(left: &[Fr], right: &[Fr], x: Fr, y: Fr) -> Vec<Fr> {
 #[cfg(test)]
 mod tests_proof {
     use super::*;
-    use crate::ipa::extended::ExtendedBulletproofDomainSeparator;
     use crate::ipa::types::{self as ipa_types, CrsSize};
     use crate::msm::verify_batch_aux;
-    use ark_secp256k1::{self, Projective};
+    use ark_vesta::{self, Projective};
     use nonempty::NonEmpty;
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
-    use spongefish::DomainSeparator;
-    use spongefish::codecs::arkworks_algebra::{CommonFieldToUnit, CommonGroupToUnit};
 
     proptest! {
       #![proptest_config(Config::with_cases(2))]
@@ -273,56 +255,33 @@ mod tests_proof {
       })) {
 
             {
-              let domain_separator = {
-                let domain_separator = DomainSeparator::new("test-ipa");
-                let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator).ratchet();
-                BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness.size())
-              };
 
-              let (statement, proof) = {
-                let mut prover_state = domain_separator.to_prover_state();
-                let statement = witness.statement(&crs);
-                prover_state.public_points(&[statement.p]).unwrap();
-                prover_state.ratchet().unwrap();
-                let proof = prove(&mut prover_state, &crs, statement, &witness).expect("proof should be generated");
-                (statement, proof)
-              };
+              let instance = witness.statement(&crs);
 
-              let mut fast_verifier_state = domain_separator.to_verifier_state(&proof);
-              fast_verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-              fast_verifier_state.ratchet().expect("failed to ratchet");
-              verify(&mut fast_verifier_state, &crs, &statement).expect("proof should verify");
+              let domain_separator =
+                  spongefish::domain_separator!("bulletproofs")
+                      .instance(&instance);
+
+              let mut prover_state = domain_separator.std_prover();
+              let narg_string = prove(&mut prover_state, &crs, instance, &witness);
+
+              let mut verifier_state = domain_separator.std_verifier(&narg_string);
+              verify(&mut verifier_state, &crs, &instance).expect("Invalid proof")
+
             }
 
             {
-
-              let domain_separator = {
-                let domain_separator = DomainSeparator::new("test-ipa");
-                // add the IO of the bulletproof statement
-                let domain_separator =
-                    ExtendedBulletproofDomainSeparator::<Projective>::extended_bulletproof_statement(domain_separator).ratchet();
-                // add the IO of the bulletproof protocol (the transcript)
-                ExtendedBulletproofDomainSeparator::<Projective>::add_extended_bulletproof(domain_separator, witness.size())
-              };
-
-              let (statement, proof) = {
-
                 let statement: ipa_types::extended::Statement<Projective> = witness.extended_statement(&crs);
-                let mut prover_state = domain_separator.to_prover_state();
-                prover_state.public_points(&[statement.p]).unwrap();
-                prover_state.public_scalars(&[statement.c]).unwrap();
-                prover_state.ratchet().unwrap();
-                let proof = extended::prove(&mut prover_state, &crs, &statement, &witness).expect("proof should be generated");
-                (statement, proof)
-              };
 
+                let domain_separator =
+                    spongefish::domain_separator!("test-ipa-extended")
+                        .instance(&statement);
 
-              let mut verifier_state = domain_separator.to_verifier_state(&proof);
-              verifier_state.public_points(&[statement.p]).expect("cannot add statment");
-              verifier_state.public_scalars(&[statement.c]).expect("cannot add statment");
-              verifier_state.ratchet().expect("failed to ratchet");
-              extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
+                let mut prover_state = domain_separator.std_prover();
+                let proof = crate::ipa::extended::prove(&mut prover_state, &crs, &statement, &witness);
 
+                let mut verifier_state = domain_separator.std_verifier(&proof);
+                crate::ipa::extended::verify(&mut verifier_state, &crs, &statement).expect("proof should verify");
             }
 
       }
@@ -331,7 +290,7 @@ mod tests_proof {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_batch_prove_verify_works((crs, witness, witness_size) in any::<CrsSize>().prop_map(|crs_size| {
+      fn test_batch_prove_verify_works((crs, witnesses, _witness_size) in any::<CrsSize>().prop_map(|crs_size| {
           let mut rng = OsRng;
           let crs: CRS<Projective> = CRS::rand(crs_size, &mut rng);
           let n = crs.size() as u64;
@@ -340,27 +299,26 @@ mod tests_proof {
           (crs, witnesses, witness_size)
       })) {
 
-        let domain_separator = {
-            let domain_separator = DomainSeparator::new("test-ipa-batch");
-            let domain_separator = BulletproofDomainSeparator::<Projective>::bulletproof_statement(domain_separator.clone()).ratchet();
-            BulletproofDomainSeparator::<Projective>::add_bulletproof(domain_separator, witness_size)
-        };
-        let statements = witness.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
+        let statements = witnesses.iter().map(|w| (w, w.statement(&crs))).collect::<Vec<_>>();
 
         let proofs = statements.par_iter().map(|(witness, statement)| {
-            let mut prover_state = domain_separator.to_prover_state();
-            prover_state.public_points(&[statement.p])?;
-            prover_state.ratchet().unwrap();
-            let proof = prove(&mut prover_state, &crs, *statement, witness)?;
-            Ok((statement, proof))
-        }).collect::<Result<Vec<_>, ProofError>>()?;
+            let domain_separator =
+                spongefish::domain_separator!("test-ipa-batch")
+                    .instance(statement);
 
-        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof)| {
-            let mut verifier_state = domain_separator.to_verifier_state(proof);
-            verifier_state.public_points(&[statement.p])?;
-            verifier_state.ratchet().unwrap();
-            verify_aux(&mut verifier_state, &crs, statement)
-        }).collect::<Result<Vec<_>, ProofError>>()?;
+            let mut prover_state = domain_separator.std_prover();
+            let narg_string = prove(&mut prover_state, &crs, *statement, witness);
+            (*statement, narg_string)
+        }).collect::<Vec<_>>();
+
+        let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, narg_string)| {
+            let domain_separator =
+                spongefish::domain_separator!("test-ipa-batch")
+                    .instance(statement);
+
+            let mut verifier_state = domain_separator.std_verifier(narg_string);
+            verify_aux(&mut verifier_state, &crs, statement).expect("verify_aux should succeed")
+        }).collect::<Vec<_>>();
 
         let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
 

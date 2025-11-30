@@ -2,24 +2,16 @@ pub mod aggregate;
 pub mod types;
 pub(crate) mod utils;
 
-use ark_ec::CurveGroup;
+use crate::BulletproofResult;
+use ark_ec::{CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, UniformRand, Zero};
-use spongefish::{
-    DomainSeparator, ProofError, ProofResult, ProverState,
-    codecs::arkworks_algebra::{
-        FieldDomainSeparator, FieldToUnitDeserialize, FieldToUnitSerialize, GroupDomainSeparator,
-        GroupToUnitDeserialize, GroupToUnitSerialize, UnitToField,
-    },
-};
-use std::{
-    iter::{repeat, successors},
-    ops::Mul,
-};
+use spongefish::{Codec, Encoding, NargDeserialize, ProverState};
+use std::{iter::successors, ops::Mul};
 use tracing::instrument;
 
 use crate::{
     ipa::{
-        extended::{self, ExtendedBulletproofDomainSeparator},
+        extended::{self},
         types::{self as ipa_types},
     },
     msm::Msm,
@@ -30,59 +22,36 @@ use crate::{
     vector_ops::{VectorOps, sum},
 };
 
-pub trait RangeProofDomainSeparator<G: CurveGroup> {
-    fn range_proof_statement(self) -> Self;
-    fn add_range_proof(self, n: usize) -> Self;
-}
-
-impl<G> RangeProofDomainSeparator<G> for DomainSeparator
-where
-    G: CurveGroup,
-    Self: GroupDomainSeparator<G> + FieldDomainSeparator<G::ScalarField>,
-{
-    fn range_proof_statement(self) -> Self {
-        self.add_points(1, "Range proof statement")
-    }
-
-    fn add_range_proof(mut self, n: usize) -> Self {
-        self = self
-            .add_points(2, "round-message: A, S")
-            .challenge_scalars(2, "challenge [y,z]")
-            .add_points(2, "round-message: T1, T2")
-            .challenge_scalars(1, "challenge x")
-            .add_scalars(3, "round-message: t_x, mu, t_hat")
-            .add_extended_bulletproof(n);
-        self
-    }
-}
-
 #[instrument(skip_all, fields(nbits = witness.n_bits), level = "debug")]
-pub fn prove<G: CurveGroup, Rng: rand::Rng>(
+pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
     mut prover_state: ProverState,
     crs: &CRS<G>,
     witness: &Witness<G::ScalarField>,
     rng: &mut Rng,
-) -> ProofResult<Vec<u8>> {
+) -> Vec<u8>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let n_bits = witness.n_bits;
     assert!(
-        crs.size() >= n_bits,
+        crs.size() >= n_bits as usize,
         "CRS size is smaller than witness nbits"
     );
 
-    let gs = &crs.ipa_crs.gs[0..n_bits];
-    let hs = &crs.ipa_crs.hs[0..n_bits];
+    let gs = &crs.ipa_crs.gs[0..n_bits as usize];
+    let hs = &crs.ipa_crs.hs[0..n_bits as usize];
 
-    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits];
+    let one_vec: Vec<G::ScalarField> = vec![G::ScalarField::one(); n_bits as usize];
     // powers of 2
     let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
         Some(*succ * G::ScalarField::from(2u64))
     })
-    .take(n_bits)
+    .take(n_bits as usize)
     .collect();
 
     let a_l: Vec<G::ScalarField> = {
         let mut bits = bit_decomposition(witness.v);
-        bits.resize(n_bits, G::ScalarField::zero());
+        bits.resize(n_bits as usize, G::ScalarField::zero());
         bits
     };
 
@@ -90,10 +59,10 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
     let alpha: G::ScalarField = UniformRand::rand(rng);
     let rho: G::ScalarField = UniformRand::rand(rng);
-    let s_l = (0..n_bits)
+    let s_l = (0..n_bits as usize)
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
-    let s_r = (0..n_bits)
+    let s_r = (0..n_bits as usize)
         .map(|_| UniformRand::rand(rng))
         .collect::<Vec<_>>();
 
@@ -109,11 +78,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
             || crs.h.mul(rho) + G::msm_unchecked(&bases, &s_scalars),
         )
     };
-    prover_state.add_points(&[a, s])?;
-    let [y, z]: [G::ScalarField; 2] = prover_state.challenge_scalars()?;
+    prover_state.prover_messages(&[a, s]);
+    let [y, z]: [G::ScalarField; 2] = prover_state.verifier_messages();
     let y_vec: Vec<G::ScalarField> =
         successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n_bits)
+            .take(n_bits as usize)
             .collect();
 
     let l_poly = {
@@ -123,7 +92,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
                 .collect(),
             s_l,
         ];
-        VectorPolynomial::new(coeffs, n_bits)
+        VectorPolynomial::new(coeffs, n_bits as usize)
     };
 
     let r_poly = {
@@ -140,7 +109,7 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
                 .collect(),
             y_vec.iter().copied().hadamard(s_r).collect(),
         ];
-        VectorPolynomial::new(coeffs, n_bits)
+        VectorPolynomial::new(coeffs, n_bits as usize)
     };
 
     let tao1: G::ScalarField = UniformRand::rand(rng);
@@ -151,11 +120,11 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
         let tt1 = crs.g.mul(t_poly[1]) + crs.h.mul(tao1);
         let tt2 = crs.g.mul(t_poly[2]) + crs.h.mul(tao2);
 
-        prover_state.add_points(&[tt1, tt2])?;
+        prover_state.prover_messages(&[tt1, tt2]);
     }
 
     {
-        let [x]: [G::ScalarField; 1] = prover_state.challenge_scalars()?;
+        let x: G::ScalarField = prover_state.verifier_message();
 
         let tao_x = tao2 * x.square() + tao1 * x + z.square() * witness.gamma;
         let mu = alpha + rho * x;
@@ -176,42 +145,48 @@ pub fn prove<G: CurveGroup, Rng: rand::Rng>(
 
         extended_statement.p += crs.h.mul(-mu);
 
-        prover_state.add_scalars(&[tao_x, mu, extended_statement.c])?;
+        prover_state.prover_messages(&[tao_x, mu, extended_statement.c]);
         let crs = ipa_types::CRS {
             gs: gs.to_vec(),
             hs: hs_prime,
             u: crs.ipa_crs.u,
         };
 
-        extended::prove(&mut prover_state, &crs, &extended_statement, &witness)
-    }?;
+        extended::prove(&mut prover_state, &crs, &extended_statement, &witness);
+    }
 
-    Ok(prover_state.narg_string().to_vec())
+    prover_state.narg_string().to_vec()
 }
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
-pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
+pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> ProofResult<Msm<G>> {
+) -> BulletproofResult<Msm<G>>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let n_bits = statement.n_bits;
-    let [a, s]: [G; 2] = verifier_state.next_points()?;
-    let [y, z]: [G::ScalarField; 2] = verifier_state.challenge_scalars()?;
-    let [tt1, tt2]: [G; 2] = verifier_state.next_points()?;
-    let [x]: [G::ScalarField; 1] = verifier_state.challenge_scalars()?;
-    let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.next_scalars()?;
+    let [a, s]: [G; 2] = verifier_state.prover_messages()?;
+    let [y, z]: [G::ScalarField; 2] = [
+        verifier_state.verifier_message(),
+        verifier_state.verifier_message(),
+    ];
+    let [tt1, tt2]: [G; 2] = verifier_state.prover_messages()?;
+    let x: G::ScalarField = verifier_state.verifier_message();
+    let [tao_x, mu, t_hat]: [G::ScalarField; 3] = verifier_state.prover_messages()?;
 
     let two_vec: Vec<G::ScalarField> = successors(Some(G::ScalarField::one()), |succ| {
         Some(*succ * G::ScalarField::from(2u64))
     })
-    .take(n_bits)
+    .take(n_bits as usize)
     .collect();
 
     let y_vec: Vec<G::ScalarField> =
         successors(Some(G::ScalarField::one()), |succ| Some(*succ * y))
-            .take(n_bits)
+            .take(n_bits as usize)
             .collect();
 
     let (g, msm) = rayon::join(
@@ -228,8 +203,8 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
                 - (statement.v.mul(z.square()) + tt1.mul(x) + tt2.mul(x.square()))
         },
         || {
-            let gs = &crs.ipa_crs.gs[0..n_bits];
-            let hs = &crs.ipa_crs.hs[0..n_bits];
+            let gs = &crs.ipa_crs.gs[0..n_bits as usize];
+            let hs = &crs.ipa_crs.hs[0..n_bits as usize];
             let scaled_hs = create_hs_prime::<G>(hs, y);
             let hs_prime = G::normalize_batch(
                 &scaled_hs
@@ -242,7 +217,7 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
                 a + s.mul(x) + {
                     let bases: Vec<G::Affine> = gs.iter().chain(hs_prime.iter()).copied().collect();
                     let scalars: Vec<G::ScalarField> = {
-                        let neg_z = repeat(-z).take(n_bits);
+                        let neg_z = std::iter::repeat_n(-z, n_bits as usize);
                         let hs_scalars = y_vec
                             .iter()
                             .copied()
@@ -262,7 +237,7 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
 
             let mut msm = extended::verify_aux(verifier_state, &crs.ipa_crs, &extended_statement)?;
             msm.scale_elems(scaled_hs.into_iter());
-            Ok::<_, ProofError>(msm)
+            Ok::<_, crate::VerificationError>(msm)
         },
     );
     let mut msm = msm?;
@@ -274,18 +249,21 @@ pub fn verify_aux<G: CurveGroup, Rng: rand::Rng>(
 }
 
 #[instrument(skip_all, fields(nbits = statement.n_bits), level = "debug")]
-pub fn verify<G: CurveGroup, Rng: rand::Rng>(
+pub fn verify<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
     verifier_state: &mut spongefish::VerifierState,
     crs: &CRS<G>,
     statement: &Statement<G>,
     rng: &mut Rng,
-) -> ProofResult<()> {
+) -> BulletproofResult<()>
+where
+    <G as PrimeGroup>::ScalarField: Codec,
+{
     let msm = verify_aux(verifier_state, crs, statement, rng)?;
     let g = msm.execute();
     if g.is_zero() {
         Ok(())
     } else {
-        Err(ProofError::InvalidProof)
+        Err(crate::VerificationError)
     }
 }
 
@@ -299,46 +277,30 @@ mod tests_range {
     use proptest::{prelude::*, test_runner::Config};
     use rand::rngs::OsRng;
     use rayon::prelude::*;
-    use spongefish::codecs::arkworks_algebra::CommonGroupToUnit;
 
     proptest! {
           #![proptest_config(Config::with_cases(4))]
           #[test]
-        fn test_range_proof(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
+        fn test_range_proof(n in prop_oneof![Just(2u64), Just(4), Just(8), Just(16), Just(32), Just(64)]) {
 
             let mut rng = OsRng;
-            let crs: CRS<Projective> = CRS::rand(n, &mut rng);
+            let crs: CRS<Projective> = CRS::rand(n as usize, &mut rng);
             // pick a random Fr value in the range [0, 2^n) via bigint conversion
             let max_value = (1u128 << n) - 1;
             let v = Fr::from(rand::Rng::gen_range(&mut rng, 0u128..=max_value));
             let witness = Witness::<Fr>::new(v, n, &mut rng);
 
-            let domain_separator = {
-                let domain_separator = DomainSeparator::new("test-range-proof");
-                // add the IO of the bulletproof statement
-                let domain_separator =
-                    RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator)
-                        .ratchet();
-                // add the IO of the bulletproof protocol (the transcript)
-                RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
-            };
-
-            let mut prover_state = domain_separator.to_prover_state();
-
             let statement = Statement::new(&crs, &witness);
 
-            prover_state.public_points(&[statement.v]).unwrap();
-            prover_state.ratchet().unwrap();
+            let domain_separator = spongefish::domain_separator!("test-range-proof")
+                .instance(&statement.v);
 
-            let proof = prove(prover_state, &crs, &witness, &mut rng).unwrap();
+            let prover_state = domain_separator.std_prover();
+            let proof = prove(prover_state, &crs, &witness, &mut rng);
 
             tracing::info!("proof size: {} bytes", proof.len());
 
-            let mut verifier_state = domain_separator.to_verifier_state(&proof);
-            verifier_state
-                .public_points(&[statement.v])
-                .expect("cannot add statment");
-            verifier_state.ratchet().expect("failed to ratchet");
+            let mut verifier_state = domain_separator.std_verifier(&proof);
             verify(&mut verifier_state, &crs, &statement, &mut rng).expect("proof should verify")
         }
     }
@@ -346,16 +308,10 @@ mod tests_range {
     proptest! {
       #![proptest_config(Config::with_cases(2))]
       #[test]
-      fn test_batch_range_proof_verify_works(n in prop_oneof![Just(2usize), Just(4), Just(8), Just(16), Just(32)]) {
+      fn test_batch_range_proof_verify_works(n in prop_oneof![Just(2u64), Just(4), Just(8), Just(16), Just(32)]) {
 
         let mut rng = OsRng;
-        let crs: CRS<Projective> = CRS::rand(n, &mut rng);
-
-        let domain_separator = {
-            let domain_separator = DomainSeparator::new("test-range-proof-batch");
-            let domain_separator = RangeProofDomainSeparator::<Projective>::range_proof_statement(domain_separator.clone()).ratchet();
-            RangeProofDomainSeparator::<Projective>::add_range_proof(domain_separator, n)
-        };
+        let crs: CRS<Projective> = CRS::rand(n as usize, &mut rng);
 
         let witnesses = (0..4).map(|_| {
             let max_value = (1u128 << n) - 1;
@@ -366,19 +322,19 @@ mod tests_range {
         let statements = witnesses.iter().map(|w| (w, Statement::new(&crs, w))).collect::<Vec<_>>();
 
         let proofs = statements.par_iter().map(|(witness, statement)| {
-            let mut prover_state = domain_separator.to_prover_state();
-            prover_state.public_points(&[statement.v])?;
-            prover_state.ratchet().unwrap();
-            let proof = prove(prover_state, &crs, witness, &mut OsRng)?;
+            let domain_separator = spongefish::domain_separator!("test-range-proof-batch")
+                .instance(&statement.v);
+            let prover_state = domain_separator.std_prover();
+            let proof = prove(prover_state, &crs, witness, &mut OsRng);
             Ok((statement, proof))
-        }).collect::<Result<Vec<_>, ProofError>>()?;
+        }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
 
         let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(statement, proof)| {
-            let mut verifier_state = domain_separator.to_verifier_state(proof);
-            verifier_state.public_points(&[statement.v])?;
-            verifier_state.ratchet().unwrap();
+            let domain_separator = spongefish::domain_separator!("test-range-proof-batch")
+                .instance(&statement.v);
+            let mut verifier_state = domain_separator.std_verifier(proof);
             verify_aux(&mut verifier_state, &crs, statement, &mut OsRng)
-        }).collect::<Result<Vec<_>, ProofError>>()?;
+        }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
 
         let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
 

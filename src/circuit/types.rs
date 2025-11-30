@@ -1,6 +1,7 @@
 use ark_ec::CurveGroup;
 use ark_ff::{Field, UniformRand};
 use ark_std::log2;
+use spongefish::Encoding;
 
 use crate::ipa::types::CrsSize;
 use crate::vector_ops::{hadamard, inner_product};
@@ -75,6 +76,7 @@ impl<Fr: Field> Witness<Fr> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encoding)]
 pub struct Statement<G: CurveGroup> {
     pub v: Vec<G>,
 }
@@ -261,7 +263,7 @@ mod tests {
                 + inner_product(circuit.w_o[i].iter().copied(), witness.a_o.iter().copied());
             let rhs = inner_product(circuit.w_v[i].iter().copied(), witness.v.iter().copied())
                 + circuit.c[i];
-            assert_eq!(lhs, rhs, "Circuit constraint {} not satisfied", i);
+            assert_eq!(lhs, rhs, "Circuit constraint {i} not satisfied");
         }
     }
 }
