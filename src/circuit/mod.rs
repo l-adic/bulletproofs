@@ -26,14 +26,14 @@ pub fn prove<G: CurveGroup + Encoding, Rng: rand::Rng>(
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
-    let n = circuit.dim();
+    let n = circuit.n();
     assert!(
-        crs.size() >= circuit.dim(),
+        crs.size() >= circuit.n(),
         "CRS size must be gte circuit dimension"
     );
     let gs = &crs.ipa_crs.gs[0..n];
     let hs = &crs.ipa_crs.hs[0..n];
-    let q = circuit.size();
+    let q = circuit.q();
     let [alpha, beta, rho]: [G::ScalarField; 3] =
         std::array::from_fn(|_| G::ScalarField::rand(rng));
 
@@ -221,8 +221,8 @@ pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
-    let n = circuit.dim();
-    let q = circuit.size();
+    let n = circuit.n();
+    let q = circuit.q();
     let gs = &crs.ipa_crs.gs[0..n];
     let hs = &crs.ipa_crs.hs[0..n];
 
@@ -393,15 +393,22 @@ mod tests {
         #![proptest_config(Config::with_cases(2))]
         #[test]
         fn test_circuit_proof(
-           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)], 4usize..100)
+           (n,q, m) in (
+              prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)]
+            , 4usize..100
+            ).prop_flat_map(|(n,q)| {
+                (0usize..10).prop_map(move |m| {
+                    (n,q,m)
+                })
+            })
         ) {
             let mut rng = OsRng;
 
-            let (circuit, witness) = types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng);
+            let (circuit, witness) = types::Circuit::<Fr>::generate_from_witness(q, n, m, &mut rng);
 
             assert!(circuit.is_satisfied_by(&witness), "Circuit not satisfied by witness");
 
-            let crs: types::CRS<Projective> = types::CRS::rand(circuit.dim(), &mut rng);
+            let crs: types::CRS<Projective> = types::CRS::rand(circuit.n(), &mut rng);
 
             let statement: Statement<Projective> = Statement::new(&crs, &witness);
 
@@ -420,12 +427,19 @@ mod tests {
         #![proptest_config(Config::with_cases(2))]
         #[test]
         fn test_batch_circuit_proof_verify_works(
-           (n,q) in (prop_oneof![Just(2), Just(4), Just(8), Just(16)], 4usize..50)
+           (n,q, m) in (
+              prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)]
+            , 4usize..100
+            ).prop_flat_map(|(n,q)| {
+                (0usize..10).prop_map(move |m| {
+                    (n,q,m)
+                })
+            })
         ) {
             let mut rng = OsRng;
 
             let circuits_and_witnesses = (0..4).map(|_| {
-                types::Circuit::<Fr>::generate_from_witness(q, n, &mut rng)
+                types::Circuit::<Fr>::generate_from_witness(q, n, m, &mut rng)
             }).collect::<Vec<_>>();
 
             let crs: types::CRS<Projective> = types::CRS::rand(n, &mut rng);
@@ -443,7 +457,7 @@ mod tests {
                 Ok((circuit, statement, proof))
             }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
 
-            let verifications: Vec<Msm<Projective>> = proofs.iter().map(|(circuit, statement, proof)| {
+            let verifications: Vec<Msm<Projective>> = proofs.par_iter().map(|(circuit, statement, proof)| {
                 let domain_separator = spongefish::domain_separator!("test-circuit-proof-batch")
                     .instance(&statement.v);
                 let mut verifier_state = domain_separator.std_verifier(proof);

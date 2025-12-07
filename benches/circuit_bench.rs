@@ -24,8 +24,9 @@ const BATCH_SIZE: usize = 50;
 fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
     c: &mut Criterion,
     crs: &CircuitCRS<Projective>,
-    n: usize, // circuit dimension (number of variables)
-    q: usize, // number of constraints
+    n: usize, // circuit dimension (number of multiplication gates)
+    q: usize, // number of linear constraints
+    m: usize, // number of public inpus
     rng: &mut Rng,
 ) {
     let mut group = c.benchmark_group(format!("circuit_{n}_{q}"));
@@ -37,11 +38,11 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark prove
     group.bench_with_input(
-        BenchmarkId::new("prove", format!("{n}_{q}")),
-        &(n, q),
+        BenchmarkId::new("prove", format!("{n}_{q}_{m}")),
+        &(n, q, m),
         |b, _| {
             b.iter(|| {
-                let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, rng);
+                let (circuit, witness) = Circuit::<Fr>::generate_from_witness(q, n, m, rng);
                 let statement: CircuitStatement<Projective> = CircuitStatement::new(crs, &witness);
 
                 let domain_separator =
@@ -57,7 +58,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark verify
     group.bench_with_input(
-        BenchmarkId::new("verify", format!("{n}_{q}")),
+        BenchmarkId::new("verify", format!("{n}_{q}_{m}")),
         &(n, q),
         |b, _| {
             b.iter(|| {
@@ -73,7 +74,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 
     // Benchmark batch verify
     group.bench_with_input(
-        BenchmarkId::new("verify_batch", format!("{n}_{q}")),
+        BenchmarkId::new("verify_batch", format!("{n}_{q}_{m}_{BATCH_SIZE}")),
         &(n, q),
         |b, _| {
             b.iter(|| {
@@ -103,12 +104,12 @@ fn bench_circuit_proofs(c: &mut Criterion) {
     let mut rng = OsRng;
     let crs: CircuitCRS<Projective> = CircuitCRS::rand(2u32.pow(20) as usize, &mut rng);
     let circuit_sizes = [
-        (2u32.pow(4), 2u32.pow(8)),
-        (2u32.pow(8), 2u32.pow(12)),
-        (2u32.pow(12), 2u32.pow(16)),
+        (2u32.pow(4), 2u32.pow(8), 10),
+        (2u32.pow(8), 2u32.pow(12), 10),
+        (2u32.pow(12), 2u32.pow(16), 10),
     ];
-    for (n, q) in circuit_sizes {
-        bench_circuit_prove_verify_cycle(c, &crs, n as usize, q as usize, &mut rng);
+    for (n, q, m) in circuit_sizes {
+        bench_circuit_prove_verify_cycle(c, &crs, n as usize, q as usize, m, &mut rng);
     }
 }
 
