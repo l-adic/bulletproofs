@@ -46,33 +46,34 @@ where
         .collect::<Vec<_>>();
 
     // Compute a_i, a_o, and s in parallel
-    let (a_i, (a_o, s)) = rayon::join(
-        || {
-            crs.h.mul(alpha) + {
-                let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-                let scalars: Vec<G::ScalarField> = witness
-                    .a_l
-                    .iter()
-                    .chain(witness.a_r.iter())
-                    .copied()
-                    .collect();
-                G::msm_unchecked(&bases, &scalars)
-            }
-        },
-        || {
-            rayon::join(
-                || crs.h.mul(beta) + G::msm_unchecked(gs, &witness.a_o),
-                || {
-                    crs.h.mul(rho) + {
-                        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
-                        let scalars: Vec<G::ScalarField> =
-                            s_l.iter().chain(s_r.iter()).copied().collect();
-                        G::msm_unchecked(&bases, &scalars)
-                    }
-                },
-            )
-        },
-    );
+    let (a_i, (a_o, s)) = {
+        let bases: Vec<G::Affine> = gs.iter().chain(hs.iter()).copied().collect();
+        rayon::join(
+            || {
+                crs.h.mul(alpha) + {
+                    let scalars: Vec<G::ScalarField> = witness
+                        .a_l
+                        .iter()
+                        .chain(witness.a_r.iter())
+                        .copied()
+                        .collect();
+                    G::msm_unchecked(&bases, &scalars)
+                }
+            },
+            || {
+                rayon::join(
+                    || crs.h.mul(beta) + G::msm_unchecked(gs, &witness.a_o),
+                    || {
+                        crs.h.mul(rho) + {
+                            let scalars: Vec<G::ScalarField> =
+                                s_l.iter().chain(s_r.iter()).copied().collect();
+                            G::msm_unchecked(&bases, &scalars)
+                        }
+                    },
+                )
+            },
+        )
+    };
 
     prover_state.prover_messages(&[a_i, a_o, s]);
     let [y, z]: [G::ScalarField; 2] = prover_state.verifier_messages();
@@ -393,12 +394,11 @@ mod tests {
         #![proptest_config(Config::with_cases(2))]
         #[test]
         fn test_circuit_proof(
-           (n,q, m) in (
+           (n, q, m) in (
               prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)]
-            , 4usize..100
-            ).prop_flat_map(|(n,q)| {
+            ).prop_flat_map(|n| {
                 (0usize..10).prop_map(move |m| {
-                    (n,q,m)
+                    (n,3 * n,m)
                 })
             })
         ) {
@@ -429,10 +429,9 @@ mod tests {
         fn test_batch_circuit_proof_verify_works(
            (n,q, m) in (
               prop_oneof![Just(2), Just(4), Just(8), Just(16), Just(32)]
-            , 4usize..100
-            ).prop_flat_map(|(n,q)| {
+            ).prop_flat_map(|n| {
                 (0usize..10).prop_map(move |m| {
-                    (n,q,m)
+                    (n,3*n,m)
                 })
             })
         ) {

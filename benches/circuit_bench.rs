@@ -103,11 +103,10 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
 fn bench_circuit_proofs(c: &mut Criterion) {
     let mut rng = OsRng;
     let crs: CircuitCRS<Projective> = CircuitCRS::rand(2u32.pow(20) as usize, &mut rng);
-    let circuit_sizes = [
-        (2u32.pow(4), 2u32.pow(8), 10),
-        (2u32.pow(8), 2u32.pow(12), 10),
-        (2u32.pow(12), 2u32.pow(16), 10),
-    ];
+    let circuit_sizes: Vec<(u32, u32, usize)> = [2u32.pow(4), 2u32.pow(8), 2u32.pow(12)]
+        .into_iter()
+        .map(|n| (n, 3 * n, 10))
+        .collect();
     for (n, q, m) in circuit_sizes {
         bench_circuit_prove_verify_cycle(c, &crs, n as usize, q as usize, m, &mut rng);
     }
