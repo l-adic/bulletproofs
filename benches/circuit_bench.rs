@@ -67,7 +67,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
                     spongefish::domain_separator!("circuit-benchmark").instance(statement);
                 let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
 
-                circuit_verify(&mut verifier_state, crs, circuit, statement, rng).unwrap();
+                circuit_verify(&mut verifier_state, crs, circuit, statement).unwrap();
             })
         },
     );
@@ -86,7 +86,7 @@ fn bench_circuit_prove_verify_cycle<Rng: rand::Rng>(
                         let domain_separator =
                             spongefish::domain_separator!("circuit-benchmark").instance(statement);
                         let mut verifier_state = domain_separator.std_verifier(&proof_data.proof);
-                        verify_aux(&mut verifier_state, crs, circuit, statement, &mut OsRng)
+                        verify_aux(&mut verifier_state, crs, circuit, statement)
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();

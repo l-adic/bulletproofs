@@ -212,12 +212,11 @@ fn create_hs_prime<G: CurveGroup>(
     hs.iter().copied().zip(ys_inv).collect::<Vec<_>>()
 }
 
-pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
+pub fn verify_aux<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut VerifierState,
     crs: &types::CRS<G>,
     circuit: &types::Circuit<G::ScalarField>,
     statement: &Statement<G>,
-    rng: &mut Rng,
 ) -> BulletproofResult<Msm<G>>
 where
     <G as PrimeGroup>::ScalarField: Codec,
@@ -259,7 +258,7 @@ where
         .take(q)
         .collect();
 
-    let mut g: Msm<G> = {
+    let g: Msm<G> = {
         let mut g = Msm::new();
 
         let delta_y_z = {
@@ -352,25 +351,22 @@ where
         Ok::<_, crate::VerificationError>(msm)
     }?;
 
-    let alpha = G::ScalarField::rand(rng);
-    g.scale(alpha);
     msm.batch(g);
 
     Ok(msm)
 }
 
 #[instrument(skip_all, fields(nbits = statement.v.len()), level = "debug")]
-pub fn verify<G: CurveGroup + Encoding + NargDeserialize, Rng: rand::Rng>(
+pub fn verify<G: CurveGroup + Encoding + NargDeserialize>(
     verifier_state: &mut spongefish::VerifierState,
     crs: &types::CRS<G>,
     circuit: &types::Circuit<G::ScalarField>,
     statement: &Statement<G>,
-    rng: &mut Rng,
 ) -> BulletproofResult<()>
 where
     <G as PrimeGroup>::ScalarField: Codec,
 {
-    let msm = verify_aux(verifier_state, crs, circuit, statement, rng)?;
+    let msm = verify_aux(verifier_state, crs, circuit, statement)?;
     let g = msm.execute();
     if g.is_zero() {
         Ok(())
@@ -419,7 +415,7 @@ mod tests {
             let proof = prove(&mut prover_state, &crs, &circuit, &witness, &mut rng);
 
             let mut verifier_state = domain_separator.std_verifier(&proof);
-            verify(&mut verifier_state, &crs, &circuit, &statement, &mut OsRng).expect("proof should verify");
+            verify(&mut verifier_state, &crs, &circuit, &statement).expect("proof should verify");
         }
     }
 
@@ -460,7 +456,7 @@ mod tests {
                 let domain_separator = spongefish::domain_separator!("test-circuit-proof-batch")
                     .instance(&statement.v);
                 let mut verifier_state = domain_separator.std_verifier(proof);
-                verify_aux(&mut verifier_state, &crs, circuit, statement, &mut OsRng)
+                verify_aux(&mut verifier_state, &crs, circuit, statement)
             }).collect::<Result<Vec<_>, crate::VerificationError>>().unwrap();
 
             let verifications = NonEmpty::from_vec(verifications).expect("non-empty vec");
