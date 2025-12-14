@@ -14,7 +14,7 @@ nonempty = "0.12"
 proptest = "1.7.0"
 spongefish = {git = "https://github.com/arkworks-rs/spongefish" , ref = "cda8c90", features = ["derive", "ark-ff", "ark-ec"] }
 rand = "0.8"
-rayon = "1.11"
+rayon = "=1.10"
 tracing = "0.1"
 
 [dev-dependencies]
