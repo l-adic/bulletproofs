@@ -1207,7 +1207,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "spongefish"
 version = "1.0.0-rc1"
-source = "git+https://github.com/arkworks-rs/spongefish#cda8c9003afe8ab1b97c753023c06b5a5dc39098"
+source = "git+https://github.com/arkworks-rs/spongefish?rev=cda8c90#cda8c9003afe8ab1b97c753023c06b5a5dc39098"
 dependencies = [
  "ark-ec",
  "ark-ff",
@@ -1224,7 +1224,7 @@ dependencies = [
 [[package]]
 name = "spongefish-derive"
 version = "1.0.0-rc1"
-source = "git+https://github.com/arkworks-rs/spongefish#cda8c9003afe8ab1b97c753023c06b5a5dc39098"
+source = "git+https://github.com/arkworks-rs/spongefish?rev=cda8c90#cda8c9003afe8ab1b97c753023c06b5a5dc39098"
 dependencies = [
  "proc-macro2",
  "quote",
